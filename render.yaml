@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: hockeyprognos
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    disk:
+      name: hockeydata
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: /data/hockey.db
+      - key: SHL_FEED_URL
+        sync: false
+      - key: SHL_FEED_TOKEN
+        sync: false
+      - key: HA_FEED_URL
+        sync: false
+      - key: HA_FEED_TOKEN
+        sync: false
