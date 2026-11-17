@@ -1,4 +1,4 @@
-import os, json, logging, sqlite3
+import os, json, logging, sqlite3, threading
 from datetime import datetime, timedelta, timezone, date
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -50,7 +50,7 @@ def nhl_final(g,landing):
 def fetch_nhl():
     # NHL's public API; no fabricated fixtures.
     start=date.today()-timedelta(days=100)
-    end=date.today()+timedelta(days=14)
+    end=date.today()+timedelta(days=21)
     games={}
     with httpx.Client(timeout=18,follow_redirects=True) as client:
         d=start
@@ -111,8 +111,8 @@ def sync():
 @asynccontextmanager
 async def lifespan(app):
     init();scheduler.add_job(sync,'interval',hours=3,id='sync',max_instances=1,replace_existing=True);scheduler.start()
-    try:sync()
-    except Exception:log.exception('Initial sync failed')
+    # Keep the web service responsive while NHL history is downloaded.
+    threading.Thread(target=sync, name='initial-hockey-sync', daemon=True).start()
     yield;scheduler.shutdown(wait=False)
 app=FastAPI(title='Hockeyprognos',lifespan=lifespan)
 @app.get('/api/leagues')
@@ -124,11 +124,12 @@ def serialize(c,m):
     p=c.execute('SELECT * FROM predictions WHERE match_id=?',(m['id'],)).fetchone()
     return {'id':m['id'],'date':m['date'],'league':m['league'],'home':m['home_name'],'away':m['away_name'],'status':m['status'],'score':{'home':m['home_goals'],'away':m['away_goals']},'prediction':None if p is None else {'home_win':p['home_win'],'draw':p['draw'],'away_win':p['away_win'],'expected_home':p['expected_home'],'expected_away':p['expected_away'],'details':json.loads(p['details']),'created_at':p['created_at']}}
 @app.get('/api/matches')
-def matches(day:date|None=None,league:str|None=None):
+def matches(day:date|None=None,league:str|None=None,days:int=Query(1,ge=1,le=14)):
     if league and league not in LEAGUES:raise HTTPException(400,'Okänd liga')
     day=day or date.today()
     with db() as c:
-        rows=c.execute('SELECT * FROM matches WHERE substr(date,1,10)=? '+('AND league=? ' if league else '')+'ORDER BY date',((day.isoformat(),league) if league else (day.isoformat(),))).fetchall()
+        end=(day+timedelta(days=days)).isoformat()
+        rows=c.execute('SELECT * FROM matches WHERE substr(date,1,10)>=? AND substr(date,1,10)<? '+('AND league=? ' if league else '')+'ORDER BY date',((day.isoformat(),end,league) if league else (day.isoformat(),end))).fetchall()
         return [serialize(c,m) for m in rows]
 @app.get('/api/matches/{match_id:path}')
 def detail(match_id:str):
