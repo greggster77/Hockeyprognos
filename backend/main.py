@@ -341,69 +341,8 @@ def fetch_nhl():
 
 
 def fetch_swedish(league):
-    url = os.getenv(f"{league}_FEED_URL")
-
-    if not url:
-        raise ValueError(
-            "Ingen datakälla är konfigurerad för "
-            + LEAGUES[league]
-        )
-
-    headers = {}
-
-    token = os.getenv(f"{league}_FEED_TOKEN")
-
-    if token:
-        headers["Authorization"] = "Bearer " + token
-
-    with httpx.Client(timeout=25) as client:
-        response = client.get(url, headers=headers)
-        response.raise_for_status()
-        items = response.json()
-
-    if not isinstance(items, list):
-        raise ValueError(
-            "Datakällan måste returnera en JSON-lista"
-        )
-
-    output = []
-
-    for item in items:
-        required = (
-            "id",
-            "date",
-            "home_id",
-            "away_id",
-            "home_name",
-            "away_name",
-            "status",
-        )
-
-        for key in required:
-            if key not in item:
-                raise ValueError("Saknat fält: " + key)
-
-        if item["status"] == "FINISHED":
-            if (
-                item.get("home_goals") is None
-                or item.get("away_goals") is None
-            ):
-                raise ValueError(
-                    "Resultat efter 60 minuter saknas"
-                )
-
-        output.append({
-            **item,
-            "id": league + ":" + str(item["id"]),
-            "home_id": (
-                league + ":" + str(item["home_id"])
-            ),
-            "away_id": (
-                league + ":" + str(item["away_id"])
-            ),
-        })
-
-    return output
+    from swedish_sources import fetch
+    return fetch(league)
 
 
 class HistoricalMatch:
