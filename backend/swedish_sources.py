@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import httpx
 
 SHL_SCHEDULE = 'https://www.shl.se/api/sports-v2/game-schedule'
+HA_SCHEDULE = 'https://www.hockeyallsvenskan.se/api/sports-v2/game-schedule'
 
 
 def pick(obj, *keys):
@@ -90,13 +91,13 @@ def normalize_flat(league, data):
     return result
 
 
-def shl_schedule():
+def swedish_schedule(league):
     """Official SHL public site schedule; API schema may change."""
     year = datetime.now(timezone.utc).year
     season_end = year + 1 if datetime.now(timezone.utc).month >= 7 else year
     with httpx.Client(timeout=25, follow_redirects=True,
                       headers={'User-Agent':'Hockeyprognos/1.0 (match statistics)'}) as client:
-        response = client.get(SHL_SCHEDULE, params={'season':season_end,'gameType':'regular'})
+        response = client.get(SHL_SCHEDULE if league == 'SHL' else HA_SCHEDULE, params={'season':season_end,'gameType':'regular'})
         response.raise_for_status()
         payload = response.json()
     if isinstance(payload, dict):
@@ -106,7 +107,7 @@ def shl_schedule():
     else:
         games = payload
     if not isinstance(games, list):
-        raise ValueError('SHL: okänt svar från officiella spelschema-API:t')
+        raise ValueError(f'{league}: okänt svar från officiella spelschema-API:t')
     rows = []
     for game in games:
         if not isinstance(game, dict):
@@ -122,16 +123,16 @@ def shl_schedule():
         when = pick(info, 'startDateTime', 'startTime', 'date') or pick(game, 'startDateTime', 'startTime')
         hid = pick(home, 'uuid', 'id', 'code')
         aid = pick(away, 'uuid', 'id', 'code')
-        hn = pick(home, 'name', 'shortName', 'teamName')
-        an = pick(away, 'name', 'shortName', 'teamName')
+        hn = pick(home, 'names', 'name', 'shortName', 'teamName')
+        an = pick(away, 'names', 'name', 'shortName', 'teamName')
         if isinstance(hn, dict):
-            hn = pick(hn, 'short', 'full', 'long', 'name')
+            hn = pick(hn, 'shortSite', 'short', 'full', 'long', 'name')
         if isinstance(an, dict):
-            an = pick(an, 'short', 'full', 'long', 'name')
+            an = pick(an, 'shortSite', 'short', 'full', 'long', 'name')
         if not all((ident, when, hid, aid, hn, an)):
             continue
         state = str(pick(info, 'state', 'gameState', 'status') or '').lower()
-        row = dict(id=f'SHL:{ident}', date=when, home_id=f'SHL:{hid}', away_id=f'SHL:{aid}',
+        row = dict(id=f'{league}:{ident}', date=when, home_id=f'{league}:{hid}', away_id=f'{league}:{aid}',
                    home_name=hn, away_name=an, home_goals=None, away_goals=None, status='SCHEDULED')
         if state in ('post-game', 'final', 'finished'):
             scores = period_goals(game) or period_goals(info)
@@ -146,14 +147,14 @@ def shl_schedule():
             row.update(status='FINISHED', home_goals=scores[0], away_goals=scores[1])
         rows.append(row)
     if not rows:
-        raise ValueError('SHL: kunde inte tolka spelschemat; kontrollera API-formatet')
+        raise ValueError(f'{league}: kunde inte tolka spelschemat; kontrollera API-formatet')
     return rows
 
 
 def fetch(league):
     url = os.getenv(f'{league}_FEED_URL')
-    if league == 'SHL' and not url:
-        return shl_schedule()
+    if league in ('SHL', 'HA') and not url:
+        return swedish_schedule(league)
     if not url:
         raise ValueError(f'{league}: saknar verifierad direktanslutning. Konfigurera {league}_FEED_URL till en matchlista i JSON-format.')
     headers = {}
