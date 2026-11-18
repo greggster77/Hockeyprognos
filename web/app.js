@@ -302,11 +302,12 @@ function formDate(d) {
     year: "2-digit",
   });
 }
-function teamFormCard(team) {
+function teamFormCard(team, league = "NHL") {
   const matches = state.formData[team] || [];
   const expanded = !!state.formExpanded[team];
-  const shown = expanded ? matches.slice(0, 20) : matches.slice(0, 5);
-  return `<section class="panel form-panel"><div class="form-heading"><div class="form-team">${teamMark(team, "NHL")}<strong>Senast ${esc(team)}</strong></div><div class="form-dots">${matches
+  const maxGames = league === "SHL" ? 10 : 20;
+  const shown = expanded ? matches.slice(0, maxGames) : matches.slice(0, 5);
+  return `<section class="panel form-panel"><div class="form-heading"><div class="form-team">${teamMark(team, league)}<strong>Senast ${esc(team)}</strong></div><div class="form-dots">${matches
     .slice(0, 5)
     .map(
       (m) =>
@@ -327,16 +328,18 @@ function teamFormCard(team) {
             })
             .join(
               "",
-            )}</div>${matches.length > 5 ? `<button class="form-more" data-form-team="${esc(team)}">${expanded ? "Visa färre matcher" : "Visa alla " + Math.min(matches.length, 20) + " matcher"} <span>${expanded ? "⌃" : "⌄"}</span></button>` : ""}`
+            )}</div>${matches.length > 5 ? `<button class="form-more" data-form-team="${esc(team)}">${expanded ? "Visa färre matcher" : "Visa alla " + Math.min(matches.length, maxGames) + " matcher"} <span>${expanded ? "⌃" : "⌄"}</span></button>` : ""}`
   }</section>`;
 }
 async function loadTeamForms(m) {
-  if (m.league !== "NHL") return;
+  if (m.league !== "NHL" && m.league !== "SHL") return;
   state.formLoading = true;
   state.formData = {};
   render();
   try {
-    const listing = await get("/api/history?league=NHL&limit=1");
+    const listing = await get(
+      "/api/history?league=" + encodeURIComponent(m.league) + "&limit=1",
+    );
     const teams = listing.teams || [];
     const selected = [m.home, m.away];
     const pairs = selected.map((name) => ({
@@ -347,7 +350,11 @@ async function loadTeamForms(m) {
       pairs.map(async (t) =>
         t.id
           ? get(
-              "/api/history?league=NHL&limit=20&team=" +
+              "/api/history?league=" +
+                encodeURIComponent(m.league) +
+                "&limit=" +
+                (m.league === "SHL" ? 10 : 20) +
+                "&team=" +
                 encodeURIComponent(t.id),
             )
           : null,
@@ -390,7 +397,7 @@ function render() {
     const m = state.detail,
       p = m.prediction,
       d = p?.details;
-    root.innerHTML = `<button class="back" id="back">← Till matcher</button><div class="eyebrow">${esc(m.league)} · ${esc(formatDate(m.date))}</div><h1 class="title">${esc(displayTeamName(m.home, m.league))} – ${esc(displayTeamName(m.away, m.league))}</h1>${card(m)}${m.league === "NHL" ? `<h2 class="form-section-title">Lagform · senaste matcher</h2>${state.formError ? `<p class="muted">${esc(state.formError)}</p>` : ""}${teamFormCard(m.home)}${teamFormCard(m.away)}` : ""}${p ? `<section class="panel"><h3>Matchanalys</h3><div class="metric"><span>Förväntade mål hemma</span><strong>${p.expected_home}</strong></div><div class="metric"><span>Förväntade mål borta</span><strong>${p.expected_away}</strong></div><div class="metric"><span>Elo hemma / borta</span><strong>${d.home_elo} / ${d.away_elo}</strong></div><div class="metric"><span>Hemmaform (mål för/emot)</span><strong>${d.home_form.scored} / ${d.home_form.conceded} (${d.home_form.played} matcher)</strong></div><div class="metric"><span>Bortaform (mål för/emot)</span><strong>${d.away_form.scored} / ${d.away_form.conceded} (${d.away_form.played} matcher)</strong></div><h3>Troligaste resultat efter 60 min</h3>${d.top_scores.map((s) => `<div class="metric"><span>${esc(s.score)}</span><strong>${pct(s.probability)}</strong></div>`).join("")}</section>` : ""}${notice()}`;
+    root.innerHTML = `<button class="back" id="back">← Till matcher</button><div class="eyebrow">${esc(m.league)} · ${esc(formatDate(m.date))}</div><h1 class="title">${esc(displayTeamName(m.home, m.league))} – ${esc(displayTeamName(m.away, m.league))}</h1>${card(m)}${m.league === "NHL" || m.league === "SHL" ? `<h2 class="form-section-title">Lagform · senaste ${m.league === "SHL" ? "10" : "20"} matcher</h2>${state.formError ? `<p class="muted">${esc(state.formError)}</p>` : ""}${teamFormCard(m.home, m.league)}${teamFormCard(m.away, m.league)}` : ""}${p ? `<section class="panel"><h3>Matchanalys</h3><div class="metric"><span>Förväntade mål hemma</span><strong>${p.expected_home}</strong></div><div class="metric"><span>Förväntade mål borta</span><strong>${p.expected_away}</strong></div><div class="metric"><span>Elo hemma / borta</span><strong>${d.home_elo} / ${d.away_elo}</strong></div><div class="metric"><span>Hemmaform (mål för/emot)</span><strong>${d.home_form.scored} / ${d.home_form.conceded} (${d.home_form.played} matcher)</strong></div><div class="metric"><span>Bortaform (mål för/emot)</span><strong>${d.away_form.scored} / ${d.away_form.conceded} (${d.away_form.played} matcher)</strong></div><h3>Troligaste resultat efter 60 min</h3>${d.top_scores.map((s) => `<div class="metric"><span>${esc(s.score)}</span><strong>${pct(s.probability)}</strong></div>`).join("")}</section>` : ""}${notice()}`;
     hydrateSwedishLogos();
     document.getElementById("back").onclick = () => {
       state.detail = null;

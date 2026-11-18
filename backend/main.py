@@ -415,7 +415,7 @@ def recompute():
                 (
                     match["league"],
                     match["date"],
-                    f"{(datetime.fromisoformat(match['date'].replace('Z', '+00:00')).year if datetime.fromisoformat(match['date'].replace('Z', '+00:00')).month >= 9 else datetime.fromisoformat(match['date'].replace('Z', '+00:00')).year - 1)}-10-01",
+                    f"{(datetime.fromisoformat(match['date'].replace('Z', '+00:00')).year if datetime.fromisoformat(match['date'].replace('Z', '+00:00')).month >= 9 else datetime.fromisoformat(match['date'].replace('Z', '+00:00')).year - 1)}-" + ("09-01" if match["league"] == "SHL" else "10-01"),
                 ),
             ).fetchall()
 
@@ -427,6 +427,7 @@ def recompute():
                     ],
                     match["home_id"],
                     match["away_id"],
+                    league=match["league"],
                 )
 
             except ValueError:
@@ -772,7 +773,7 @@ def history(
         raise HTTPException(400, "Okänd liga")
     season_start = date.today().year if date.today().month >= 9 else date.today().year - 1
     filters = ["league=?", "status='FINISHED'", "home_goals IS NOT NULL", "away_goals IS NOT NULL", "substr(date,1,10)>=?"]
-    args = [league, f"{season_start}-10-01"]
+    args = [league, f"{season_start}-" + ("09-01" if league == "SHL" else "10-01")]
     if team:
         filters.append("(home_id=? OR away_id=?)")
         args.extend([team, team])

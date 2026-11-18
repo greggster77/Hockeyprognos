@@ -49,7 +49,7 @@ def weighted_form(matches, team_id, limit=20, recent=5, recent_share=0.70):
             "avg": avg}
 
 
-def predict(history, home_id, away_id):
+def predict(history, home_id, away_id, league="NHL"):
     # history contains ONLY completed matches before the prediction date,
     # sorted chronologically, within the current NHL season.
     if len(history) < 20:
@@ -60,8 +60,9 @@ def predict(history, home_id, away_id):
             continue
         ratings[m.home_id], ratings[m.away_id] = update_elo(
             ratings[m.home_id], ratings[m.away_id], m.home_goals, m.away_goals)
-    hf = weighted_form(history, home_id)
-    af = weighted_form(history, away_id)
+    window = 10 if league == "SHL" else 20
+    hf = weighted_form(history, home_id, limit=window)
+    af = weighted_form(history, away_id, limit=window)
     if hf["played"] < 3 or af["played"] < 3:
         raise ValueError("För få matcher för något av lagen (minst 3).")
     league_home = sum(m.home_goals for m in history) / len(history)
@@ -102,7 +103,7 @@ def predict(history, home_id, away_id):
         "home_form": {"played": hf["played"], "scored": round(hf["gf"] * hf["played"], 1), "conceded": round(hf["ga"] * hf["played"], 1)},
         "away_form": {"played": af["played"], "scored": round(af["gf"] * af["played"], 1), "conceded": round(af["ga"] * af["played"], 1)},
         "league_home_avg": round(league_home, 2), "league_away_avg": round(league_away, 2),
-        "model_version": "nhl-2026-20games-70pct-v1", "recent_matches": 5,
-        "window_matches": 20, "recent_weight_pct": 70,
+        "model_version": ("shl-2026-10games-70pct-v1" if league == "SHL" else "nhl-2026-20games-70pct-v1"), "recent_matches": 5,
+        "window_matches": window, "recent_weight_pct": 70,
         "home_venue_games": len(hf["home"]), "away_venue_games": len(af["away"]),
     })
