@@ -159,26 +159,38 @@ const SWEDISH_CLUBS = {
   },
 };
 // Matchdatans kortnamn kopplas till samma namn som SHL:s loggregister.
+
 const SHL_CANONICAL = {
   Brynäs: "Brynäs IF",
   Djurgården: "Djurgårdens IF",
   "Djurgården Hockey": "Djurgårdens IF",
+  "Djurgården Herr": "Djurgårdens IF",
+
   Färjestad: "Färjestad BK",
+  "Färjestad Herr": "Färjestad BK",
+
   Frölunda: "Frölunda HC",
   Linköping: "Linköping HC",
+
   Luleå: "Luleå Hockey",
   "Luleå HF": "Luleå Hockey",
+
   Malmö: "Malmö Redhawks",
   Redhawks: "Malmö Redhawks",
+
   Örebro: "Örebro Hockey",
   "Örebro HK": "Örebro Hockey",
+
   Rögle: "Rögle BK",
   Skellefteå: "Skellefteå AIK",
   Timrå: "Timrå IK",
   Växjö: "Växjö Lakers",
+
   Björklöven: "Björklöven",
   "IF Björklöven": "Björklöven",
+  "Björklöven Herr": "Björklöven",
 };
+
 function displayTeamName(name, league) {
   return league === "SHL" ? SHL_CANONICAL[name] || name : name;
 }
