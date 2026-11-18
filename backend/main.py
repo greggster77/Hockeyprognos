@@ -106,6 +106,9 @@ def init():
             updated_at TEXT,
             error TEXT
         );
+        CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(date);
+        CREATE INDEX IF NOT EXISTS idx_matches_league_date ON matches(league, date);
+        CREATE INDEX IF NOT EXISTS idx_matches_history ON matches(league, status, date);
         """)
 
 
@@ -760,14 +763,12 @@ def leagues():
     ]
 
 
-def serialize(c, match):
-    prediction = c.execute(
-        """
-        SELECT * FROM predictions
-        WHERE match_id=?
-        """,
-        (match["id"],),
-    ).fetchone()
+def serialize(c, match, prediction=None, preloaded=False):
+    if not preloaded:
+        prediction = c.execute(
+            "SELECT * FROM predictions WHERE match_id=?",
+            (match["id"],),
+        ).fetchone()
 
     if prediction is None:
         prediction_data = None
@@ -820,8 +821,8 @@ def matches(
 
     sql = """
         SELECT * FROM matches
-        WHERE substr(date,1,10)>=?
-          AND substr(date,1,10)<?
+        WHERE date>=?
+          AND date<?
     """
 
     params = [
@@ -841,8 +842,17 @@ def matches(
             params,
         ).fetchall()
 
+        # One joined/batched prediction lookup instead of N database round trips.
+        predictions_by_id = {}
+        if rows:
+            ids = [match["id"] for match in rows]
+            placeholders = ",".join("?" for _ in ids)
+            prediction_rows = c.execute(
+                f"SELECT * FROM predictions WHERE match_id IN ({placeholders})", ids
+            ).fetchall()
+            predictions_by_id = {p["match_id"]: p for p in prediction_rows}
         return [
-            serialize(c, match)
+            serialize(c, match, predictions_by_id.get(match["id"]), preloaded=True)
             for match in rows
         ]
 
