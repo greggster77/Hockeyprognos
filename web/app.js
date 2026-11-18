@@ -50,6 +50,16 @@ const SWEDISH_CLUBS={
  'Västerås IK':['Västerås IK','Västerås'], 'Västerås':['Västerås IK','Västerås'],
  'Östersunds IK':['Östersunds IK','Östersund'], 'Östersund':['Östersunds IK','Östersund']}
 };
+// Matchdatans kortnamn kopplas till samma namn som SHL:s loggregister.
+const SHL_CANONICAL={
+ 'Brynäs':'Brynäs IF','Djurgården':'Djurgårdens IF','Djurgården Hockey':'Djurgårdens IF',
+ 'Färjestad':'Färjestad BK','Frölunda':'Frölunda HC','Linköping':'Linköping HC',
+ 'Luleå':'Luleå Hockey','Luleå HF':'Luleå Hockey','Malmö':'Malmö Redhawks',
+ 'Redhawks':'Malmö Redhawks','Örebro':'Örebro Hockey','Örebro HK':'Örebro Hockey',
+ 'Rögle':'Rögle BK','Skellefteå':'Skellefteå AIK','Timrå':'Timrå IK',
+ 'Växjö':'Växjö Lakers','Björklöven':'Björklöven','IF Björklöven':'Björklöven'
+};
+function displayTeamName(name,league){return league==='SHL'?(SHL_CANONICAL[name]||name):name}
 // SHL:s officiella lagregister ger klubbmärken direkt, utan Wikimedia-sökning.
 // 2026/27 grundserie: ssgtUuid från SHL:s layout-info.
 const SHL_SSGT_UUID='qa98unlbd6';
@@ -75,21 +85,21 @@ async function loadSHLLogoDirectory(){
  return shlLogoDirectoryPromise;
 }
 async function resolveSwedishLogo(league,name){
- const aliases=SWEDISH_CLUBS[league]?.[name];if(!aliases)return null;
- const key=logoKey(league,aliases[0]);
+ if(league!=='SHL')return null; // HA och NHL ändras inte.
+ const canonical=displayTeamName(name,league);
+ const key=logoKey(league,canonical);
  if(logoMemo.has(key))return logoMemo.get(key);
- if(league!=='SHL')return null; // HA lämnas oförändrat tills dess källa fungerar.
  const sites=await loadSHLLogoDirectory();
- const names=[name,...aliases].map(normalizedLogoText);
- const site=sites.find(s=>names.includes(normalizedLogoText(s.name)))||sites.find(s=>names.some(n=>n.length>=5&&normalizedLogoText(s.name).includes(n)));
+ const target=normalizedLogoText(canonical);
+ const site=sites.find(s=>normalizedLogoText(s.name)===target);
  let url=site?.icon||'';
- // Do not invent CDN paths when the API provides no verified image URL.
- if(url&&url.startsWith('//'))url='https:'+url;
- if(url&&url.startsWith('/'))url='https://www.shl.se'+url;
- if(url&&!/^https:\/\//i.test(url))url='';
+ if(url.startsWith('//'))url='https:'+url;
+ else if(url.startsWith('/'))url='https://www.shl.se'+url;
+ if(!/^https:\/\//i.test(url))url='';
  if(url)logoMemo.set(key,url);
  return url||null;
 }
+
 function hydrateSwedishLogos(){
  document.querySelectorAll('[data-swedish-logo]').forEach(async el=>{
   const league=el.dataset.league,name=el.dataset.team;
@@ -102,11 +112,11 @@ function hydrateSwedishLogos(){
 }
 function teamMark(name,league){
   const code=league==='NHL'?NHL_CODES[name]:null;
-  if(!code){const swedish=Boolean(SWEDISH_CLUBS[league]?.[name]);return `<span class="team-initial" ${swedish?`data-swedish-logo="1" data-league="${esc(league)}" data-team="${esc(name)}"`:''} aria-hidden="true">${esc(name).slice(0,2).toUpperCase()}</span>`;}
+  if(!code){const swedish=league==='SHL'||Boolean(SWEDISH_CLUBS[league]?.[name]);return `<span class="team-initial" ${swedish?`data-swedish-logo="1" data-league="${esc(league)}" data-team="${esc(name)}"`:''} aria-hidden="true">${esc(name).slice(0,2).toUpperCase()}</span>`;}
   return `<img class="team-logo" src="https://assets.nhle.com/logos/nhl/svg/${code}_light.svg" alt="${esc(name)} klubbmärke" loading="lazy" decoding="async" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'"><span class="team-initial" style="display:none" aria-hidden="true">${esc(code)}</span>`;
 }
 function notice(){return '<section class="panel notice">ℹ️ Prognoser är statistiska uppskattningar, inte garantier. 1X2 avser resultatet efter 60 minuter – utan förlängning och straffar.</section>'}
-function card(m){const p=m.prediction;return `<article class="panel match" data-id="${esc(m.id)}"><div class="topline"><span>${esc(m.league)} · ${esc(formatDate(m.date))}</span><span>${m.status==='FINISHED'?'60 min: '+m.score.home+'–'+m.score.away:'Kommande'}</span></div><div class="teams"><div class="team-side">${teamMark(m.home,m.league)}<span>${esc(m.home)}</span></div><span class="vs">VS</span><div class="team-side">${teamMark(m.away,m.league)}<span>${esc(m.away)}</span></div></div>${p?`<div class="percent"><div><small>1 · Hemma</small><b>${pct(p.home_win)}</b></div><div><small>X · Oavgjort</small><b>${pct(p.draw)}</b></div><div><small>2 · Borta</small><b>${pct(p.away_win)}</b></div></div>`:'<p class="muted">Ingen prognos tillgänglig: otillräcklig verifierad matchhistorik.</p>'}</article>`}
+function card(m){const p=m.prediction;return `<article class="panel match" data-id="${esc(m.id)}"><div class="topline"><span>${esc(m.league)} · ${esc(formatDate(m.date))}</span><span>${m.status==='FINISHED'?'60 min: '+m.score.home+'–'+m.score.away:'Kommande'}</span></div><div class="teams"><div class="team-side">${teamMark(m.home,m.league)}<span>${esc(displayTeamName(m.home,m.league))}</span></div><span class="vs">VS</span><div class="team-side">${teamMark(m.away,m.league)}<span>${esc(displayTeamName(m.away,m.league))}</span></div></div>${p?`<div class="percent"><div><small>1 · Hemma</small><b>${pct(p.home_win)}</b></div><div><small>X · Oavgjort</small><b>${pct(p.draw)}</b></div><div><small>2 · Borta</small><b>${pct(p.away_win)}</b></div></div>`:'<p class="muted">Ingen prognos tillgänglig: otillräcklig verifierad matchhistorik.</p>'}</article>`}
 
 // Resultat efter 60 minuter: V / O / F utifrån valt lags perspektiv.
 function teamFormResult(m,team){const home=m.home===team;const gf=Number(home?m.score?.home:m.score?.away),ga=Number(home?m.score?.away:m.score?.home);return gf>ga?'V':gf<ga?'F':'O'}
@@ -115,7 +125,7 @@ function teamFormCard(team){const matches=state.formData[team]||[];const expande
 async function loadTeamForms(m){if(m.league!=='NHL')return;state.formLoading=true;state.formData={};render();try{const listing=await get('/api/history?league=NHL&limit=1');const teams=listing.teams||[];const selected=[m.home,m.away];const pairs=selected.map(name=>({name,id:teams.find(t=>t.name===name)?.id}));const result=await Promise.all(pairs.map(async t=>t.id?get('/api/history?league=NHL&limit=20&team='+encodeURIComponent(t.id)):null));if(state.detail?.id!==m.id)return;pairs.forEach((t,i)=>{state.formData[t.name]=result[i]?.matches||[]})}catch(e){if(state.detail?.id===m.id)state.formError=e.message}finally{if(state.detail?.id===m.id){state.formLoading=false;render()}}}
 function showDetail(m){state.detail=m;state.formExpanded={};state.formData={};state.formError='';render();loadTeamForms(m)}
 function bindFormButtons(){document.querySelectorAll('[data-form-team]').forEach(b=>b.onclick=()=>{const team=b.dataset.formTeam;state.formExpanded[team]=!state.formExpanded[team];render()})}
-function render(){document.documentElement.classList.toggle('light',state.light);if(state.detail){const m=state.detail,p=m.prediction,d=p?.details;root.innerHTML=`<button class="back" id="back">← Till matcher</button><div class="eyebrow">${esc(m.league)} · ${esc(formatDate(m.date))}</div><h1 class="title">${esc(m.home)} – ${esc(m.away)}</h1>${card(m)}${m.league==='NHL'?`<h2 class="form-section-title">Lagform · senaste matcher</h2>${state.formError?`<p class="muted">${esc(state.formError)}</p>`:''}${teamFormCard(m.home)}${teamFormCard(m.away)}`:''}${p?`<section class="panel"><h3>Matchanalys</h3><div class="metric"><span>Förväntade mål hemma</span><strong>${p.expected_home}</strong></div><div class="metric"><span>Förväntade mål borta</span><strong>${p.expected_away}</strong></div><div class="metric"><span>Elo hemma / borta</span><strong>${d.home_elo} / ${d.away_elo}</strong></div><div class="metric"><span>Hemmaform (mål för/emot)</span><strong>${d.home_form.scored} / ${d.home_form.conceded} (${d.home_form.played} matcher)</strong></div><div class="metric"><span>Bortaform (mål för/emot)</span><strong>${d.away_form.scored} / ${d.away_form.conceded} (${d.away_form.played} matcher)</strong></div><h3>Troligaste resultat efter 60 min</h3>${d.top_scores.map(s=>`<div class="metric"><span>${esc(s.score)}</span><strong>${pct(s.probability)}</strong></div>`).join('')}</section>`:''}${notice()}`;hydrateSwedishLogos();document.getElementById('back').onclick=()=>{state.detail=null;render()};bindFormButtons();return}
+function render(){document.documentElement.classList.toggle('light',state.light);if(state.detail){const m=state.detail,p=m.prediction,d=p?.details;root.innerHTML=`<button class="back" id="back">← Till matcher</button><div class="eyebrow">${esc(m.league)} · ${esc(formatDate(m.date))}</div><h1 class="title">${esc(displayTeamName(m.home,m.league))} – ${esc(displayTeamName(m.away,m.league))}</h1>${card(m)}${m.league==='NHL'?`<h2 class="form-section-title">Lagform · senaste matcher</h2>${state.formError?`<p class="muted">${esc(state.formError)}</p>`:''}${teamFormCard(m.home)}${teamFormCard(m.away)}`:''}${p?`<section class="panel"><h3>Matchanalys</h3><div class="metric"><span>Förväntade mål hemma</span><strong>${p.expected_home}</strong></div><div class="metric"><span>Förväntade mål borta</span><strong>${p.expected_away}</strong></div><div class="metric"><span>Elo hemma / borta</span><strong>${d.home_elo} / ${d.away_elo}</strong></div><div class="metric"><span>Hemmaform (mål för/emot)</span><strong>${d.home_form.scored} / ${d.home_form.conceded} (${d.home_form.played} matcher)</strong></div><div class="metric"><span>Bortaform (mål för/emot)</span><strong>${d.away_form.scored} / ${d.away_form.conceded} (${d.away_form.played} matcher)</strong></div><h3>Troligaste resultat efter 60 min</h3>${d.top_scores.map(s=>`<div class="metric"><span>${esc(s.score)}</span><strong>${pct(s.probability)}</strong></div>`).join('')}</section>`:''}${notice()}`;hydrateSwedishLogos();document.getElementById('back').onclick=()=>{state.detail=null;render()};bindFormButtons();return}
 if(state.view==='history'){
 root.innerHTML=`<div class="header"><div><div class="eyebrow">NHL · ${esc(state.historySeason||'2026/27')}</div><h1 class="title">🏒 Matchhistorik</h1><div class="muted">Verifierade resultat efter 60 minuter</div></div><button class="theme" id="theme">${state.light?'🌙 Mörkt':'☀️ Ljust'}</button></div><div class="filters"><button class="chip" id="to-matches">Kommande matcher</button><button class="chip active">NHL-historik</button></div><div class="controls"><select class="date" id="history-team"><option value="">Alla NHL-lag</option>${state.historyTeams.map(t=>`<option value="${esc(t.id)}" ${t.id===state.historyTeam?'selected':''}>${esc(t.name)}</option>`).join('')}</select><button class="chip" id="history-refresh">↻</button></div>${state.error?`<section class="panel warning">⚠️ ${esc(state.error)}</section>`:''}${state.loading?'<section class="panel empty">Hämtar historik…</section>':`<p class="muted">${state.historyTotal} färdigspelade matcher · visar ${state.history.length?state.historyOffset+1:0}–${state.historyOffset+state.history.length}</p>${state.history.length?state.history.map(card).join(''):'<section class="panel empty">Ingen importerad NHL-historik hittades.</section>'}<div class="controls history-pager"><button class="chip" id="history-prev" ${state.historyOffset===0?'disabled':''}>← Föregående</button><button class="chip" id="history-next" ${state.historyOffset+state.history.length>=state.historyTotal?'disabled':''}>Nästa →</button></div>`}${notice()}`;
 hydrateSwedishLogos();document.getElementById('theme').onclick=()=>{state.light=!state.light;localStorage.setItem('theme',state.light?'light':'dark');render()};document.getElementById('to-matches').onclick=()=>{state.view='matches';load()};document.getElementById('history-team').onchange=e=>{state.historyTeam=e.target.value;state.historyOffset=0;loadHistory()};document.getElementById('history-refresh').onclick=loadHistory;document.getElementById('history-prev')?.addEventListener('click',()=>{state.historyOffset=Math.max(0,state.historyOffset-state.historyLimit);loadHistory()});document.getElementById('history-next')?.addEventListener('click',()=>{state.historyOffset+=state.historyLimit;loadHistory()});document.querySelectorAll('[data-id]').forEach(el=>el.onclick=async()=>{try{showDetail(await get('/api/matches/'+encodeURIComponent(el.dataset.id)))}catch(e){state.error=e.message;render()}});return;
