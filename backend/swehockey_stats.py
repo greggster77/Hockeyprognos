@@ -69,3 +69,21 @@ def parse_goalies(html):
     aliases={'rank':['Rk','Rank'],'number':['No','Nr'],'name':['Name','Namn'],'team':['Team','Lag'],'played':['GPI','GP'],'shots':['SOG'],'against':['GA'],'gaa':['GAA'],'save_pct':['SVS%','SV%','Save%']}
     rows=_parse_table(html,['name','team','save_pct'],aliases,['rank','played','shots','against','gaa','save_pct'])
     return [r for r in rows if r['save_pct'] is not None and 0<=r['save_pct']<=100][:45]
+
+
+def inspect_tables(html):
+    """Return diagnostic information about HTML tables."""
+    parser = Tables()
+    parser.feed(html)
+
+    return {
+        "table_count": len(parser.tables),
+        "tables": [
+            {
+                "rows": len(table),
+                "headers": table[0] if table else [],
+                "sample": table[:3]
+            }
+            for table in parser.tables
+        ]
+    }
