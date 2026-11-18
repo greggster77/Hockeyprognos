@@ -596,6 +596,51 @@ app = FastAPI(
 )
 
 
+
+# SHL team directory is fetched server-side to avoid browser CORS restrictions.
+# No guessed image URL is generated: only URLs actually supplied by the API are used.
+_shl_logo_cache = {"expires": 0.0, "result": None}
+
+@app.get("/api/shl/logos")
+def shl_logos():
+    import time
+    from urllib.parse import urljoin, urlparse
+    current = time.monotonic()
+    if _shl_logo_cache["result"] is not None and current < _shl_logo_cache["expires"]:
+        return _shl_logo_cache["result"]
+    url = "https://www.shl.se/api/sports-v2/all-sites/qa98unlbd6"
+    try:
+        with httpx.Client(timeout=15, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 Hockeyprognos/1.0", "Accept": "application/json"}) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            payload = response.json()
+        if isinstance(payload, list):
+            records = payload
+        elif isinstance(payload, dict):
+            records = next((payload[k] for k in ("sites", "siteList", "teams", "teamList", "data") if isinstance(payload.get(k), list)), [])
+        else:
+            records = []
+        teams = []
+        for entry in records:
+            if not isinstance(entry, dict):
+                continue
+            names = entry.get("names") if isinstance(entry.get("names"), dict) else {}
+            name = entry.get("name") or entry.get("displayName") or names.get("long") or names.get("short") or ""
+            image = next((entry.get(k) for k in ("icon", "logo", "logoUrl", "imageUrl", "publicUrl", "public_url") if isinstance(entry.get(k), str) and entry.get(k)), "")
+            if isinstance(image, dict):
+                image = image.get("url", "")
+            if image and isinstance(image, str):
+                image = urljoin("https://www.shl.se", image)
+                if urlparse(image).scheme != "https":
+                    image = ""
+            teams.append({"name": str(name), "logo": image})
+        result = {"teams": teams, "source": "SHL all-sites", "count": len(teams), "logos_found": sum(bool(t["logo"]) for t in teams)}
+        _shl_logo_cache.update(expires=current + 3600, result=result)
+        return result
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        log.warning("SHL logo directory unavailable: %s", exc)
+        raise HTTPException(status_code=502, detail="SHL:s lagregister kunde inte hämtas från servern")
+
 @app.get("/api/leagues")
 def leagues():
     with db() as c:

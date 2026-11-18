@@ -60,14 +60,14 @@ function normalizedLogoText(v){return String(v??'').toLocaleLowerCase('sv').norm
 async function loadSHLLogoDirectory(){
  if(!shlLogoDirectoryPromise){
   shlLogoDirectoryPromise=(async()=>{
-   const r=await fetch('https://www.shl.se/api/sports-v2/all-sites/'+SHL_SSGT_UUID,{signal:AbortSignal.timeout(10000)});
+   const r=await fetch('/api/shl/logos',{signal:AbortSignal.timeout(10000)});
    if(!r.ok)throw Error('SHL lagregister HTTP '+r.status);
    const data=await r.json();
-   const sites=Array.isArray(data)?data:(data.sites||data.siteList||data.teams||data.teamList||[]);
+   const sites=Array.isArray(data)?data:(data.teams||[]);
    if(!Array.isArray(sites)||!sites.length)throw Error('SHL lagregister saknar laglista');
    return sites.map(s=>({
     name:s.name||s.displayName||s.names?.long||s.names?.short||'',
-    icon:s.icon||s.publicUrl||s.public_url||s.logo||'',
+    icon:s.logo||s.icon||'',
     id:s.instanceId||s.instance_id||s.id||s.ownerInstanceId||''
    }));
   })().catch(err=>{console.warn('SHL-loggor kunde inte hämtas:',err);shlLogoDirectoryPromise=null;return []});
@@ -83,7 +83,7 @@ async function resolveSwedishLogo(league,name){
  const names=[name,...aliases].map(normalizedLogoText);
  const site=sites.find(s=>names.includes(normalizedLogoText(s.name)))||sites.find(s=>names.some(n=>n.length>=5&&normalizedLogoText(s.name).includes(n)));
  let url=site?.icon||'';
- if(!url&&site?.id)url='https://sportality.cdn.s8y.se/team-logos/'+encodeURIComponent(site.id)+'.svg';
+ // Do not invent CDN paths when the API provides no verified image URL.
  if(url&&url.startsWith('//'))url='https:'+url;
  if(url&&url.startsWith('/'))url='https://www.shl.se'+url;
  if(url&&!/^https:\/\//i.test(url))url='';
