@@ -624,7 +624,7 @@ function render() {
     state.date = e.target.value;
     load();
   };
-  document.getElementById("refresh").onclick = load;
+  document.getElementById("refresh").onclick = () => load(true);
   document.getElementById("open-stats").onclick = () => { state.view = "shl-stats"; render(); if (!state.shlStats) loadShlStatistics(); };
   document.getElementById("open-analysis").onclick = () => {
     state.view = "analysis";
@@ -669,32 +669,105 @@ async function loadHistory() {
   state.loading = false;
   render();
 }
-async function load() {
-  state.loading = true;
-  state.error = "";
-  render();
-  try {
-    const [matches, leagues] = await Promise.all([
-      get(
-        "/api/matches?day=" +
-          state.date +
-          "&days=" +
-          state.days +
-          (state.league === "ALL" ? "" : "&league=" + state.league),
-      ),
-      get("/api/leagues"),
-    ]);
-    state.matches = matches;
-    state.leagues = leagues;
-  } catch (e) {
-    state.error =
-      "Kunde inte hämta riktig matchdata. Kontrollera internetanslutningen och servern. " +
-      e.message;
-    state.matches = [];
-  }
-  state.loading = false;
-  render();
+// Fast league switching: stale-while-revalidate with a small, bounded session cache.
+// Never persist sensitive data; these endpoints contain only public match information.
+const MATCH_CACHE_TTL = 45 * 1000;
+const MATCH_CACHE_STALE = 5 * 60 * 1000;
+const MATCH_CACHE_MAX = 12;
+const matchCache = new Map();
+const pendingMatches = new Map();
+let loadGeneration = 0;
+let leagueData = null;
+let leaguePromise = null;
+
+function matchKey(day, days, league) {
+  return `${day}|${days}|${league}`;
 }
+function readMatchCache(key) {
+  let entry = matchCache.get(key);
+  if (!entry) {
+    try {
+      const stored = sessionStorage.getItem("hp34:" + key);
+      if (stored) entry = JSON.parse(stored);
+    } catch (_) { /* private mode or storage disabled */ }
+  }
+  if (!entry || !Array.isArray(entry.data) || Date.now() - entry.time > MATCH_CACHE_STALE) return null;
+  matchCache.delete(key);
+  matchCache.set(key, entry);
+  return entry;
+}
+function saveMatchCache(key, data) {
+  const entry = {time: Date.now(), data};
+  matchCache.delete(key);
+  matchCache.set(key, entry);
+  while (matchCache.size > MATCH_CACHE_MAX) {
+    const oldest = matchCache.keys().next().value;
+    matchCache.delete(oldest);
+    try { sessionStorage.removeItem("hp34:" + oldest); } catch (_) {}
+  }
+  try { sessionStorage.setItem("hp34:" + key, JSON.stringify(entry)); } catch (_) {}
+}
+function getLeaguesOnce() {
+  if (leagueData) return Promise.resolve(leagueData);
+  if (!leaguePromise) {
+    leaguePromise = get("/api/leagues")
+      .then(data => { leagueData = data; return data; })
+      .finally(() => { leaguePromise = null; });
+  }
+  return leaguePromise;
+}
+function fetchMatches(key, day, days, league) {
+  if (!pendingMatches.has(key)) {
+    const path = "/api/matches?day=" + day + "&days=" + days +
+      (league === "ALL" ? "" : "&league=" + encodeURIComponent(league));
+    const promise = get(path).then(data => {
+      saveMatchCache(key, data);
+      return data;
+    }).finally(() => pendingMatches.delete(key));
+    pendingMatches.set(key, promise);
+  }
+  return pendingMatches.get(key);
+}
+async function load(force = false) {
+  // onclick passes a MouseEvent, not a boolean; only explicit true forces refresh.
+  force = force === true;
+  const generation = ++loadGeneration;
+  const {date: day, days, league} = state;
+  const key = matchKey(day, days, league);
+  const cached = !force && readMatchCache(key);
+  state.error = "";
+  if (cached) {
+    state.matches = cached.data;
+    state.loading = false;
+  } else {
+    state.matches = [];
+    state.loading = true;
+  }
+  render();
+  // Fetch league metadata only once per page session, not on every tab switch.
+  getLeaguesOnce().then(data => {
+    state.leagues = data;
+    if (generation === loadGeneration) render();
+  }).catch(() => { /* match list can still be shown without league metadata */ });
+  if (cached && Date.now() - cached.time < MATCH_CACHE_TTL) return;
+  try {
+    const matches = await fetchMatches(key, day, days, league);
+    if (generation !== loadGeneration || state.view !== "matches") return;
+    state.matches = matches;
+    state.loading = false;
+    render();
+  } catch (e) {
+    if (generation !== loadGeneration) return;
+    state.loading = false;
+    if (!cached) {
+      state.error = "Kunde inte hämta matchdata. Kontrollera internetanslutningen och servern. " + e.message;
+    } else {
+      state.error = "Visar tidigare hämtade matcher. Uppdateringen misslyckades: " + e.message;
+    }
+    render();
+  }
+}
+
 load();
 if ("serviceWorker" in navigator)
   navigator.serviceWorker.register("/sw.js").catch(() => {});
