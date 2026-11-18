@@ -91,64 +91,90 @@ def normalize_flat(league, data):
     return result
 
 
-def swedish_schedule(league):
-    """Official SHL public site schedule; API schema may change."""
-    year = datetime.now(timezone.utc).year
-    season_end = year + 1 if datetime.now(timezone.utc).month >= 7 else year
-    with httpx.Client(timeout=25, follow_redirects=True,
-                      headers={'User-Agent':'Hockeyprognos/1.0 (match statistics)'}) as client:
-        response = client.get(SHL_SCHEDULE if league == 'SHL' else HA_SCHEDULE, params={'season':season_end,'gameType':'regular'})
-        response.raise_for_status()
-        payload = response.json()
+def find_shl_season(payload, end_year):
+    """Resolve the official season/series/game-type UUIDs, never guess numeric IDs."""
+    candidates = []
+    def visit(value):
+        if isinstance(value, list):
+            for item in value: visit(item)
+        elif isinstance(value, dict):
+            if ('ssgtUuid' in value or 'ssgt_uuid' in value) and ('season' in value or 'seasonInfo' in value or 'seasonName' in value):
+                candidates.append(value)
+            for child in value.values():
+                if isinstance(child, (list, dict)): visit(child)
+    visit(payload)
+    for row in candidates:
+        season = row.get('seasonInfo') or row.get('season') or {}
+        if not isinstance(season, dict): season = {'name':str(season)}
+        label = ' '.join(str(x) for x in (season.get('name'), season.get('code'), row.get('seasonName')) if x)
+        series = row.get('seriesInfo') or row.get('series') or {}
+        if not isinstance(series, dict): series = {'code':str(series)}
+        game_type = row.get('gameTypeInfo') or row.get('gameType') or {}
+        if not isinstance(game_type, dict): game_type = {'code':str(game_type)}
+        series_label = ' '.join(str(x) for x in series.values())
+        type_label = ' '.join(str(x) for x in game_type.values())
+        if (str(end_year) in label or str(end_year-1) in label) and 'SHL' in series_label.upper() and ('REGULAR' in type_label.upper() or 'GRUNDSERIE' in type_label.upper()):
+            return row
+    raise ValueError(f'SHL: säsongen {end_year-1}/{end_year} saknas i ligans säsongskatalog eller har ett okänt format')
+
+
+def parse_shl_schedule(payload):
+    """Official schedule is an envelope with gameInfo entries."""
     if isinstance(payload, dict):
         games = pick(payload, 'gameInfo', 'games', 'gameSchedule', 'data')
-        if isinstance(games, dict):
-            games = pick(games, 'gameInfo', 'games', 'items')
+        if isinstance(games, dict): games = pick(games, 'gameInfo', 'games', 'items')
     else:
         games = payload
     if not isinstance(games, list):
-        raise ValueError(f'{league}: okänt svar från officiella spelschema-API:t')
+        raise ValueError('SHL: okänt svar från spelschema-API:t')
     rows = []
     for game in games:
-        if not isinstance(game, dict):
-            continue
+        if not isinstance(game, dict): continue
         info = pick(game, 'gameInfo') or game
-        if not isinstance(info, dict):
-            continue
+        if not isinstance(info, dict): continue
         home = pick(game, 'homeTeamInfo', 'homeTeam') or pick(info, 'homeTeamInfo', 'homeTeam') or {}
         away = pick(game, 'awayTeamInfo', 'awayTeam') or pick(info, 'awayTeamInfo', 'awayTeam') or {}
-        if not isinstance(home, dict) or not isinstance(away, dict):
-            continue
+        if not isinstance(home, dict) or not isinstance(away, dict): continue
         ident = pick(info, 'uuid', 'id') or pick(game, 'uuid', 'id')
         when = pick(info, 'startDateTime', 'startTime', 'date') or pick(game, 'startDateTime', 'startTime')
-        hid = pick(home, 'uuid', 'id', 'code')
-        aid = pick(away, 'uuid', 'id', 'code')
-        hn = pick(home, 'names', 'name', 'shortName', 'teamName')
-        an = pick(away, 'names', 'name', 'shortName', 'teamName')
-        if isinstance(hn, dict):
-            hn = pick(hn, 'shortSite', 'short', 'full', 'long', 'name')
-        if isinstance(an, dict):
-            an = pick(an, 'shortSite', 'short', 'full', 'long', 'name')
-        if not all((ident, when, hid, aid, hn, an)):
-            continue
+        hid, aid = pick(home, 'uuid', 'id', 'code'), pick(away, 'uuid', 'id', 'code')
+        hn, an = pick(home, 'names', 'name', 'shortName', 'teamName'), pick(away, 'names', 'name', 'shortName', 'teamName')
+        if isinstance(hn, dict): hn = pick(hn, 'shortSite', 'short', 'full', 'long', 'name')
+        if isinstance(an, dict): an = pick(an, 'shortSite', 'short', 'full', 'long', 'name')
+        if not all((ident, when, hid, aid, hn, an)): continue
         state = str(pick(info, 'state', 'gameState', 'status') or '').lower()
-        row = dict(id=f'{league}:{ident}', date=when, home_id=f'{league}:{hid}', away_id=f'{league}:{aid}',
-                   home_name=hn, away_name=an, home_goals=None, away_goals=None, status='SCHEDULED')
+        row = dict(id=f'SHL:{ident}', date=when, home_id=f'SHL:{hid}', away_id=f'SHL:{aid}', home_name=hn, away_name=an, home_goals=None, away_goals=None, status='SCHEDULED')
         if state in ('post-game', 'final', 'finished'):
             scores = period_goals(game) or period_goals(info)
             overtime = pick(info, 'overtime', 'shootout') or pick(game, 'overtime', 'shootout')
             if scores is None and not overtime:
-                h = integer(pick(home, 'score', 'goals'))
-                a = integer(pick(away, 'score', 'goals'))
-                if h is not None and a is not None:
-                    scores = (h,a)
-            if scores is None:
-                continue
+                h, a = integer(pick(home, 'score', 'goals')), integer(pick(away, 'score', 'goals'))
+                if h is not None and a is not None: scores = (h, a)
+            if scores is None: continue
             row.update(status='FINISHED', home_goals=scores[0], away_goals=scores[1])
         rows.append(row)
-    if not rows:
-        raise ValueError(f'{league}: kunde inte tolka spelschemat; kontrollera API-formatet')
+    if not rows: raise ValueError('SHL: kunde inte tolka spelschemat')
     return rows
+
+
+def swedish_schedule(league):
+    year = datetime.now(timezone.utc).year
+    end_year = year + 1 if datetime.now(timezone.utc).month >= 7 else year
+    if league == 'HA':
+        raise ValueError('HA: tidigare sports-v2-adress returnerar inte JSON. En verifierad HA-källa behövs; ange HA_FEED_URL med matchlista i JSON-format.')
+    with httpx.Client(timeout=25, follow_redirects=True, headers={'User-Agent':'Mozilla/5.0', 'Accept':'application/json'}) as client:
+        directory = client.get('https://www.shl.se/api/statistics-v2/layout-info')
+        directory.raise_for_status()
+        season = find_shl_season(directory.json(), end_year)
+        season_info = season.get('seasonInfo') or season.get('season') or {}
+        game_type = season.get('gameTypeInfo') or season.get('gameType') or {}
+        season_uuid = pick(season, 'seasonUuid') or (pick(season_info, 'uuid') if isinstance(season_info, dict) else None)
+        game_type_uuid = pick(season, 'gameTypeUuid') or (pick(game_type, 'uuid') if isinstance(game_type, dict) else None)
+        if not season_uuid or not game_type_uuid:
+            raise ValueError('SHL: säsongskatalogen saknar seasonUuid/gameTypeUuid')
+        response = client.get(SHL_SCHEDULE, params={'seasonUuid':season_uuid, 'gameTypeUuid':game_type_uuid})
+        response.raise_for_status()
+        return parse_shl_schedule(response.json())
 
 
 def fetch(league):
