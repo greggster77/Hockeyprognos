@@ -472,7 +472,7 @@ function render() {
     )
     .join(
       "",
-    )}${notice()}<section class="panel accuracy-panel"><h3>🎯 Modellens träffsäkerhet · ${state.league === "ALL" ? "NHL (endast NHL-statistik)" : state.league === "HA" ? "HockeyAllsvenskan" : state.league}</h3><div id="perf">Hämtar utvärderade prognoser…</div></section>`;
+    )}${notice()}<section class="panel"><h3>🧪 Modelltest · tidigare matcher</h3><p class="muted">Jämför nuvarande modell med experimentell målmodell. Testet påverkar inte liveprognoser.</p><button class="chip" id="run-backtest">Kör backtest</button><div id="backtest-result" class="muted" style="margin-top:12px"></div></section><section class="panel accuracy-panel"><h3>🎯 Modellens träffsäkerhet · ${state.league === "ALL" ? "NHL (endast NHL-statistik)" : state.league === "HA" ? "HockeyAllsvenskan" : state.league}</h3><div id="perf">Hämtar utvärderade prognoser…</div></section>`;
   hydrateSwedishLogos();
   document.getElementById("theme").onclick = () => {
     state.light = !state.light;
@@ -504,6 +504,27 @@ function render() {
         }
       }),
   );
+  document.getElementById("run-backtest").onclick = async () => {
+    const output = document.getElementById("backtest-result");
+    const button = document.getElementById("run-backtest");
+    const league = state.league === "ALL" ? "SHL" : state.league;
+    button.disabled = true;
+    output.textContent = "Testar tidigare matcher i " + league + "…";
+    try {
+      const data = await get(
+        "/api/backtest?league=" + encodeURIComponent(league) + "&limit=120",
+      );
+      const fmt = (x, digits = 3) =>
+        x == null ? "–" : Number(x).toFixed(digits);
+      const a = data.models.current,
+        b = data.models.experimental;
+      output.innerHTML = `<p>${esc(data.method)}</p><div class="accuracy-stats"><div><strong>${a.evaluated}</strong><span>Jämförda matcher</span></div><div><strong>${fmt(a.accuracy_pct, 1)}%</strong><span>Nuvarande träff</span></div><div><strong>${fmt(b.accuracy_pct, 1)}%</strong><span>Experiment träff</span></div></div><div class="metric"><span>Brier · nuvarande / experiment</span><strong>${fmt(a.mean_brier)} / ${fmt(b.mean_brier)}</strong></div><div class="metric"><span>Log loss · nuvarande / experiment</span><strong>${fmt(a.mean_log_loss)} / ${fmt(b.mean_log_loss)}</strong></div><p class="muted">${esc(data.warning)}</p>`;
+    } catch (e) {
+      output.textContent = "Kunde inte köra modelltest: " + e.message;
+    } finally {
+      button.disabled = false;
+    }
+  };
   get(
     "/api/performance?league=" +
       encodeURIComponent(state.league === "ALL" ? "NHL" : state.league),

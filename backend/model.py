@@ -49,7 +49,26 @@ def weighted_form(matches, team_id, limit=20, recent=5, recent_share=0.70):
             "avg": avg}
 
 
-def predict(history, home_id, away_id, league="NHL"):
+def dixon_coles_factor(home_goals, away_goals, home_rate, away_rate, rho=-0.08):
+    """Low-score correlation adjustment; only applied to the experimental model.
+
+    Negative rho increases 0-0 and 1-1 relative to independent Poisson.
+    The parameter is a hypothesis to validate with walk-forward backtesting.
+    """
+    if home_goals == 0 and away_goals == 0:
+        return 1 - home_rate * away_rate * rho
+    if home_goals == 0 and away_goals == 1:
+        return 1 + home_rate * rho
+    if home_goals == 1 and away_goals == 0:
+        return 1 + away_rate * rho
+    if home_goals == 1 and away_goals == 1:
+        return 1 - rho
+    return 1.0
+
+
+def predict(history, home_id, away_id, league="NHL", variant="current"):
+    if variant not in ("current", "experimental"):
+        raise ValueError("Okänd modellvariant")
     # history contains ONLY completed matches before the prediction date,
     # sorted chronologically, within the current NHL season.
     if len(history) < 20:
@@ -90,7 +109,11 @@ def predict(history, home_id, away_id, league="NHL"):
     elo_factor = max(.75, min(1.25, 10 ** ((ratings[home_id] - ratings[away_id]) / 1600)))
     xh = max(.15, min(4.5, league_home * h_attack * a_def * elo_factor))
     xa = max(.15, min(4.5, league_away * a_attack * h_def / elo_factor))
-    matrix = [(i, j, poisson(i, xh) * poisson(j, xa)) for i in range(9) for j in range(9)]
+    matrix = [
+        (i, j, poisson(i, xh) * poisson(j, xa) *
+         (dixon_coles_factor(i, j, xh, xa) if variant == "experimental" else 1.0))
+        for i in range(9) for j in range(9)
+    ]
     ph = sum(p for i, j, p in matrix if i > j)
     pd = sum(p for i, j, p in matrix if i == j)
     pa = sum(p for i, j, p in matrix if i < j)
@@ -103,7 +126,7 @@ def predict(history, home_id, away_id, league="NHL"):
         "home_form": {"played": hf["played"], "scored": round(hf["gf"] * hf["played"], 1), "conceded": round(hf["ga"] * hf["played"], 1)},
         "away_form": {"played": af["played"], "scored": round(af["gf"] * af["played"], 1), "conceded": round(af["ga"] * af["played"], 1)},
         "league_home_avg": round(league_home, 2), "league_away_avg": round(league_away, 2),
-        "model_version": ("shl-2026-10games-70pct-v1" if league == "SHL" else "nhl-2026-20games-70pct-v1"), "recent_matches": 5,
+        "model_version": (("shl-dc-experimental-v1" if league == "SHL" else "nhl-dc-experimental-v1") if variant == "experimental" else ("shl-2026-10games-70pct-v1" if league == "SHL" else "nhl-2026-20games-70pct-v1")), "recent_matches": 5,
         "window_matches": window, "recent_weight_pct": 70,
         "home_venue_games": len(hf["home"]), "away_venue_games": len(af["away"]),
     })

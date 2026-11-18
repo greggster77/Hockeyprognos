@@ -883,6 +883,74 @@ def performance(league: str = "NHL"):
     }
 
 
+
+@app.get("/api/backtest")
+def backtest(league: str = "SHL", limit: int = Query(default=120, ge=20, le=300)):
+    """Walk-forward comparison, strictly using earlier games within each season.
+
+    Does NOT change live predictions. No archived forecasts are rewritten.
+    This is a retrospective model test, not a record of real pregame picks.
+    """
+    if league not in LEAGUES:
+        raise HTTPException(status_code=400, detail="Okänd liga")
+    with db() as c:
+        rows = c.execute("""
+            SELECT * FROM matches
+            WHERE league=? AND status='FINISHED'
+              AND home_goals IS NOT NULL AND away_goals IS NOT NULL
+            ORDER BY date, id
+        """, (league,)).fetchall()
+
+    def season_key(iso):
+        d = datetime.fromisoformat(iso.replace('Z', '+00:00'))
+        return d.year if d.month >= (9 if league == 'SHL' else 10) else d.year - 1
+
+    by_season = {}
+    for row in rows:
+        by_season.setdefault(season_key(row['date']), []).append(row)
+    # Group by exact start time: simultaneous matches must not inform each other.
+    eligible = []
+    for season_rows in by_season.values():
+        for row in season_rows:
+            prior = [r for r in season_rows if r['date'] < row['date']]
+            if len(prior) >= 20:
+                eligible.append((row, prior))
+    eligible.sort(key=lambda item: (item[0]['date'], item[0]['id']))
+    eligible = eligible[-limit:]
+    results = {name: {"evaluated": 0, "correct": 0, "brier_sum": 0.0, "log_loss_sum": 0.0}
+               for name in ('current', 'experimental')}
+    import math
+    for match, prior in eligible:
+        history = [HistoricalMatch(r) for r in prior]
+        actual = ('1' if match['home_goals'] > match['away_goals']
+                  else '2' if match['home_goals'] < match['away_goals'] else 'X')
+        for name, stats in results.items():
+            try:
+                p = predict(history, match['home_id'], match['away_id'], league=league, variant=name)
+            except ValueError:
+                continue
+            probs = {'1': p['home_win'] / 100, 'X': p['draw'] / 100, '2': p['away_win'] / 100}
+            stats['evaluated'] += 1
+            stats['correct'] += int(max(probs, key=probs.get) == actual)
+            stats['brier_sum'] += sum((probs[k] - int(k == actual)) ** 2 for k in ('1', 'X', '2'))
+            stats['log_loss_sum'] += -math.log(max(1e-12, probs[actual]))
+    summary = {}
+    for name, stats in results.items():
+        n = stats['evaluated']
+        summary[name] = {
+            'evaluated': n,
+            'accuracy_pct': round(100 * stats['correct'] / n, 2) if n else None,
+            'mean_brier': round(stats['brier_sum'] / n, 5) if n else None,
+            'mean_log_loss': round(stats['log_loss_sum'] / n, 5) if n else None,
+        }
+    return {
+        'league': league, 'available_finished': len(rows),
+        'eligible_sample': len(eligible), 'requested_limit': limit,
+        'models': summary, 'live_model': 'current',
+        'method': 'Walk-forward: bara matcher före avspark i samma säsong; 1X2 efter 60 minuter. Lägre Brier/log loss är bättre. Experimentet är inte aktiverat för liveprognoser.',
+        'warning': 'Testet förutsätter att importerade resultat verkligen avser 60 minuter. En enda säsong eller få matcher ger osäkra slutsatser.'
+    }
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
