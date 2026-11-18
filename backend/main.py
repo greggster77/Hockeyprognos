@@ -602,6 +602,36 @@ app = FastAPI(
 # No guessed image URL is generated: only URLs actually supplied by the API are used.
 _shl_logo_cache = {"expires": 0.0, "result": None}
 
+# Short-lived cache: official source is not queried on every browser render.
+_swehockey_cache = {"expires": 0.0, "data": None}
+
+@app.get("/api/shl/statistics")
+async def swehockey_statistics():
+    import asyncio
+    import time
+    from datetime import datetime, timezone
+    from swehockey_stats import SOURCES, parse_standings, parse_scorers, parse_goalies
+    now = time.monotonic()
+    if _swehockey_cache["data"] is not None and now < _swehockey_cache["expires"]:
+        return _swehockey_cache["data"]
+    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        async def fetch(url):
+            try:
+                response = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; Hockeyprognos/2.3)"})
+                response.raise_for_status()
+                return response.text
+            except httpx.HTTPError as exc:
+                log.warning("Swehockey statistics fetch failed: %s", exc)
+                return ""
+        pages = await asyncio.gather(*(fetch(url) for url in SOURCES.values()))
+    parsers = [parse_standings, parse_scorers, parse_goalies]
+    results = {key: fn(html) for key, fn, html in zip(SOURCES, parsers, pages)}
+    result = {"season": "2026/27", "source": SOURCES, "updated_at": datetime.now(timezone.utc).isoformat(),
+              **results, "note": "Säsongsstatistik. Ingen målvakt är bekräftad som starter."}
+    _swehockey_cache.update(data=result, expires=now+(600 if all(results.values()) else 90))
+    return result
+
+
 @app.get("/api/shl/goalkeepers")
 async def shl_goalkeepers():
     from shl_goalkeepers import SOURCE, parse_goalkeepers

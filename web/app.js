@@ -28,6 +28,10 @@ const state = {
   goalies: null,
   goalieError: "",
   goalieLoading: false,
+  shlStats: null,
+  shlStatsError: "",
+  shlStatsLoading: false,
+  shlStatsTab: "standings",
 };
 state.date = state.date.split("-").join("-");
 const esc = (x) =>
@@ -426,8 +430,39 @@ function bindFormButtons() {
       }),
   );
 }
+async function loadShlStatistics() {
+  state.shlStatsLoading = true;
+  state.shlStatsError = "";
+  render();
+  try { state.shlStats = await get("/api/shl/statistics"); }
+  catch (e) { state.shlStatsError = e.message; }
+  finally { state.shlStatsLoading = false; if (state.view === "shl-stats") render(); }
+}
+
+function shlStatisticsView() {
+  const data = state.shlStats || {};
+  const tab = state.shlStatsTab;
+  const fmt = (n, digits = 0) => n == null ? "–" : Number(n).toFixed(digits).replace(".", ",");
+  const cols = {
+    standings: [["rank","#"],["team","Lag"],["played","M"],["wins","V"],["draws","O"],["losses","F"],["goal_diff","MS"],["points","P"]],
+    scorers: [["rank","#"],["name","Spelare"],["team","Lag"],["played","M"],["goals","Mål"],["assists","Ass"],["points","Poäng"]],
+    goalies: [["rank","#"],["name","Målvakt"],["team","Lag"],["played","Matcher"],["shots","Skott"],["gaa","GAA"],["save_pct","Räddn. %"]]
+  };
+  const fields = cols[tab];
+  const rows = data[tab] || [];
+  const numeric = new Set(["gaa","save_pct"]);
+  const table = rows.length ? `<div class="swehockey-table-wrap"><table class="swehockey-table"><thead><tr>${fields.map(([,label])=>`<th>${label}</th>`).join("")}</tr></thead><tbody>${rows.map(r=>`<tr>${fields.map(([k])=>`<td>${esc(typeof r[k] === "number" ? fmt(r[k], numeric.has(k) ? 2 : 0) : (r[k] || "–"))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>` : `<div class="swehockey-empty">Ingen verifierad statistik kunde läsas för den här kategorin. Kontrollera källan nedan.</div>`;
+  const source = {standings:"https://stats.swehockey.se/ScheduleAndResults/Overview/20961",scorers:"https://stats.swehockey.se/Players/Statistics/ScoringLeaders/20961",goalies:"https://stats.swehockey.se/Players/Statistics/LeadingGoaliesSVS/20961"}[tab];
+  root.innerHTML = `<div class="header"><div><div class="eyebrow">SWEHOCKEY · SHL 2026/27</div><h1 class="title">📊 SHL Statistik</h1><div class="muted">Officiell säsongsstatistik · Svenska Ishockeyförbundet</div></div><button class="theme" id="theme">${state.light ? "🌙 Mörkt" : "☀️ Ljust"}</button></div><div class="filters"><button class="chip" id="stats-back">← Matcher</button>${[["standings","Tabell"],["scorers","Poängliga"],["goalies","Målvakter"]].map(([id,label])=>`<button class="chip ${tab===id?"active":""}" data-stats-tab="${id}">${label}</button>`).join("")}<button class="chip" id="stats-refresh">↻ Uppdatera</button></div><section class="panel swehockey-panel"><div class="swehockey-head"><div><h3>${{standings:"🏆 SHL-tabellen",scorers:"🏒 Poängligan",goalies:"🥅 Målvaktsligan"}[tab]}</h3><p class="muted">Säsongen 2026/27 · ${rows.length} poster</p></div><span class="swehockey-tag">Officiell statistik</span></div>${state.shlStatsLoading ? '<p class="muted">Hämtar Swehockey-statistik…</p>' : state.shlStatsError ? `<p class="muted">Kunde inte hämta statistik: ${esc(state.shlStatsError)}</p>` : table}<p class="muted" style="margin-top:14px">${tab==="goalies"?"Säsongsstatistik – inte bekräftade startmålvakter. ":""}Källa: <a href="${source}" target="_blank" rel="noopener noreferrer">Swehockey ↗</a></p></section><section class="panel notice">ℹ️ Statistiken visas separat och påverkar ännu inte prognosmodellens 1X2-beräkningar.</section>`;
+  document.getElementById("theme").onclick = () => {state.light=!state.light;localStorage.setItem("theme",state.light?"light":"dark");render();};
+  document.getElementById("stats-back").onclick = () => {state.view="matches";render();};
+  document.getElementById("stats-refresh").onclick = loadShlStatistics;
+  document.querySelectorAll("[data-stats-tab]").forEach(el => el.onclick = () => {state.shlStatsTab=el.dataset.statsTab;render();});
+}
+
 function render() {
   document.documentElement.classList.toggle("light", state.light);
+  if (state.view === "shl-stats" && !state.detail) { shlStatisticsView(); return; }
   if (state.detail) {
     const m = state.detail,
       p = m.prediction,
@@ -561,7 +596,7 @@ function render() {
     )
     .join(
       "",
-    )}<button class="chip" id="open-analysis">🧪 Modellanalys</button></div><div class="controls"><input class="date" type="date" id="date" value="${state.date}"><button class="chip" id="refresh">↻</button></div>${state.error ? `<section class="panel warning">⚠️ ${esc(state.error)}</section>` : ""}${state.loading ? '<section class="panel empty">Hämtar matcher…</section>' : state.matches.length ? state.matches.map(card).join("") : '<section class="panel empty"><strong>Inga verifierade matcher hittades</strong><p class="muted">Välj ett annat datum eller kontrollera datakällornas status.</p></section>'}${state.leagues
+    )}<button class="chip" id="open-stats">📊 SHL Statistik</button><button class="chip" id="open-analysis">🧪 Modellanalys</button></div><div class="controls"><input class="date" type="date" id="date" value="${state.date}"><button class="chip" id="refresh">↻</button></div>${state.error ? `<section class="panel warning">⚠️ ${esc(state.error)}</section>` : ""}${state.loading ? '<section class="panel empty">Hämtar matcher…</section>' : state.matches.length ? state.matches.map(card).join("") : '<section class="panel empty"><strong>Inga verifierade matcher hittades</strong><p class="muted">Välj ett annat datum eller kontrollera datakällornas status.</p></section>'}${state.leagues
     .filter(
       (l) => l.error && (state.league === "ALL" || l.league === state.league),
     )
@@ -590,6 +625,7 @@ function render() {
     load();
   };
   document.getElementById("refresh").onclick = load;
+  document.getElementById("open-stats").onclick = () => { state.view = "shl-stats"; render(); if (!state.shlStats) loadShlStatistics(); };
   document.getElementById("open-analysis").onclick = () => {
     state.view = "analysis";
     render();
