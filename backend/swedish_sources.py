@@ -123,8 +123,9 @@ def normalize_flat(league, data):
 
 def find_shl_season(payload, end_year):
     candidates = []
+
     def visit(node):
         if isinstance(node, list):
-    for value in node:
-        visit(value)
-elif isinstance(node, dict):
+            for value in node:
+                visit(value)
+        elif isinstance(node, dict):
