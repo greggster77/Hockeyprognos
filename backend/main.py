@@ -947,7 +947,7 @@ def backtest(league: str = "SHL", limit: int = Query(default=120, ge=20, le=300)
         'league': league, 'available_finished': len(rows),
         'eligible_sample': len(eligible), 'requested_limit': limit,
         'models': summary, 'live_model': 'current',
-        'method': 'Walk-forward: bara matcher före avspark i samma säsong; 1X2 efter 60 minuter. Lägre Brier/log loss är bättre. Experimentet är inte aktiverat för liveprognoser.',
+        'method': 'Walk-forward: bara matcher före nedsläpp i samma säsong; 1X2 efter 60 minuter. Lägre Brier/log loss är bättre. Experimentet är inte aktiverat för liveprognoser.',
         'warning': 'Testet förutsätter att importerade resultat verkligen avser 60 minuter. En enda säsong eller få matcher ger osäkra slutsatser.'
     }
 

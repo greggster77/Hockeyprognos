@@ -15,6 +15,7 @@ const state = {
   light: localStorage.getItem("theme") === "light",
   days: 7,
   view: "matches",
+  analysisLeague: "SHL",
   history: [],
   historyTeams: [],
   historyTeam: "",
@@ -406,6 +407,70 @@ function render() {
     bindFormButtons();
     return;
   }
+  if (state.view === "analysis") {
+    root.innerHTML = `<div class="header"><div><div class="eyebrow">STATISTIK · HOCKEY</div><h1 class="title">🧪 Modellanalys</h1><div class="muted">Backtest och prognosernas träffsäkerhet</div></div><button class="theme" id="theme">${state.light ? "🌙 Mörkt" : "☀️ Ljust"}</button></div><div class="filters"><button class="chip" id="analysis-back">← Matcher</button><button class="chip ${state.analysisLeague === "SHL" ? "active" : ""}" data-analysis-league="SHL">SHL</button><button class="chip ${state.analysisLeague === "NHL" ? "active" : ""}" data-analysis-league="NHL">NHL</button></div><section class="panel"><h3>🧪 Modelltest · ${esc(state.analysisLeague)}</h3><p class="muted">Jämför nuvarande modell med experimentell målmodell på tidigare matcher. Testet ändrar inte liveprognoserna.</p><button class="chip" id="run-backtest">Kör backtest</button><div id="backtest-result" class="muted" style="margin-top:12px"></div></section><section class="panel accuracy-panel"><h3>🎯 Modellens träffsäkerhet · ${esc(state.analysisLeague)}</h3><div id="perf">Hämtar utvärderade prognoser…</div></section>`;
+    document.getElementById("theme").onclick = () => {
+      state.light = !state.light;
+      localStorage.setItem("theme", state.light ? "light" : "dark");
+      render();
+    };
+    document.getElementById("analysis-back").onclick = () => {
+      state.view = "matches";
+      render();
+    };
+    document.querySelectorAll("[data-analysis-league]").forEach(
+      (el) =>
+        (el.onclick = () => {
+          state.analysisLeague = el.dataset.analysisLeague;
+          render();
+        }),
+    );
+    document.getElementById("run-backtest").onclick = async () => {
+      const output = document.getElementById("backtest-result");
+      const button = document.getElementById("run-backtest");
+      const league = state.analysisLeague;
+      button.disabled = true;
+      output.textContent = "Testar tidigare matcher i " + league + "…";
+      try {
+        const data = await get(
+          "/api/backtest?league=" + encodeURIComponent(league) + "&limit=120",
+        );
+        const fmt = (x, digits = 3) =>
+          x == null ? "–" : Number(x).toFixed(digits);
+        const a = data.models.current,
+          b = data.models.experimental;
+        output.innerHTML = `<p>${esc(data.method)}</p><div class="accuracy-stats"><div><strong>${a.evaluated}</strong><span>Jämförda matcher</span></div><div><strong>${fmt(a.accuracy_pct, 1)}%</strong><span>Nuvarande träff</span></div><div><strong>${fmt(b.accuracy_pct, 1)}%</strong><span>Experiment träff</span></div></div><div class="metric"><span>Brier · nuvarande / experiment</span><strong>${fmt(a.mean_brier)} / ${fmt(b.mean_brier)}</strong></div><div class="metric"><span>Log loss · nuvarande / experiment</span><strong>${fmt(a.mean_log_loss)} / ${fmt(b.mean_log_loss)}</strong></div><p class="muted">${esc(data.warning)}</p>`;
+      } catch (e) {
+        output.textContent = "Kunde inte köra modelltest: " + e.message;
+      } finally {
+        button.disabled = false;
+      }
+    };
+    get("/api/performance?league=" + encodeURIComponent(state.analysisLeague))
+      .then((p) => {
+        const el = document.getElementById("perf");
+        if (!el || p.league !== state.analysisLeague) return;
+        const games = p.recent || [];
+        el.innerHTML = `<p class="muted">${esc(p.method)}</p><div class="accuracy-stats"><div><strong>${p.evaluated}</strong><span>Utvärderade</span></div><div><strong>${p.accuracy_pct === null ? "–" : pct(p.accuracy_pct)}</strong><span>Rätt favorit (1/X/2)</span></div><div><strong>${p.mean_brier === null ? "–" : Number(p.mean_brier).toFixed(3)}</strong><span>Brier-poäng</span></div></div>${
+          !p.evaluated
+            ? '<p class="muted">Inga sparade förhandsprognoser har ännu hunnit avslutas och utvärderas. Statistik byggs upp automatiskt.</p>'
+            : `<h4>Träffsäkerhet per prognosstyrka</h4><div class="accuracy-bins">${p.calibration
+                .filter((b) => b.games)
+                .map(
+                  (b) =>
+                    `<div class="metric"><span>${esc(b.range)} % favorit · ${b.games} matcher</span><strong>${pct(b.hit_rate_pct)} rätt</strong></div>`,
+                )
+                .join(
+                  "",
+                )}</div><h4>Senaste utvärderade matcher</h4>${games.map((g) => `<div class="metric"><span>${g.correct ? "✓" : "✕"} ${esc(g.home)} – ${esc(g.away)} (${g.score.home}–${g.score.away})<small class="accuracy-sub"> Tips ${esc(g.predicted_outcome)} · Utfall ${esc(g.actual_outcome)}</small></span><strong>${g.correct ? "Rätt" : "Fel"}</strong></div>`).join("")}`
+        }<p class="muted">${p.pending_forecasts} sparade prognoser väntar på resultat.</p>${p.storage_warning ? `<p class="accuracy-warning">⚠️ ${esc(p.storage_warning)}</p>` : ""}`;
+      })
+      .catch(() => {
+        const el = document.getElementById("perf");
+        if (el) el.textContent = "Träffsäkerheten kunde inte hämtas.";
+      });
+    return;
+  }
   if (state.view === "history") {
     root.innerHTML = `<div class="header"><div><div class="eyebrow">NHL · ${esc(state.historySeason || "2026/27")}</div><h1 class="title">🏒 Matchhistorik</h1><div class="muted">Verifierade resultat efter 60 minuter</div></div><button class="theme" id="theme">${state.light ? "🌙 Mörkt" : "☀️ Ljust"}</button></div><div class="filters"><button class="chip" id="to-matches">Kommande matcher</button><button class="chip active">NHL-historik</button></div><div class="controls"><select class="date" id="history-team"><option value="">Alla NHL-lag</option>${state.historyTeams.map((t) => `<option value="${esc(t.id)}" ${t.id === state.historyTeam ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select><button class="chip" id="history-refresh">↻</button></div>${state.error ? `<section class="panel warning">⚠️ ${esc(state.error)}</section>` : ""}${state.loading ? '<section class="panel empty">Hämtar historik…</section>' : `<p class="muted">${state.historyTotal} färdigspelade matcher · visar ${state.history.length ? state.historyOffset + 1 : 0}–${state.historyOffset + state.history.length}</p>${state.history.length ? state.history.map(card).join("") : '<section class="panel empty">Ingen importerad NHL-historik hittades.</section>'}<div class="controls history-pager"><button class="chip" id="history-prev" ${state.historyOffset === 0 ? "disabled" : ""}>← Föregående</button><button class="chip" id="history-next" ${state.historyOffset + state.history.length >= state.historyTotal ? "disabled" : ""}>Nästa →</button></div>`}${notice()}`;
     hydrateSwedishLogos();
@@ -472,7 +537,7 @@ function render() {
     )
     .join(
       "",
-    )}${notice()}<section class="panel"><h3>🧪 Modelltest · tidigare matcher</h3><p class="muted">Jämför nuvarande modell med experimentell målmodell. Testet påverkar inte liveprognoser.</p><button class="chip" id="run-backtest">Kör backtest</button><div id="backtest-result" class="muted" style="margin-top:12px"></div></section><section class="panel accuracy-panel"><h3>🎯 Modellens träffsäkerhet · ${state.league === "ALL" ? "NHL (endast NHL-statistik)" : state.league === "HA" ? "HockeyAllsvenskan" : state.league}</h3><div id="perf">Hämtar utvärderade prognoser…</div></section>`;
+    )}${notice()}<div class="controls"><button class="chip" id="open-analysis">🧪 Modellanalys · SHL / NHL</button></div>`;
   hydrateSwedishLogos();
   document.getElementById("theme").onclick = () => {
     state.light = !state.light;
@@ -491,6 +556,10 @@ function render() {
     load();
   };
   document.getElementById("refresh").onclick = load;
+  document.getElementById("open-analysis").onclick = () => {
+    state.view = "analysis";
+    render();
+  };
   document.querySelectorAll("[data-id]").forEach(
     (el) =>
       (el.onclick = async () => {
@@ -504,54 +573,6 @@ function render() {
         }
       }),
   );
-  document.getElementById("run-backtest").onclick = async () => {
-    const output = document.getElementById("backtest-result");
-    const button = document.getElementById("run-backtest");
-    const league = state.league === "ALL" ? "SHL" : state.league;
-    button.disabled = true;
-    output.textContent = "Testar tidigare matcher i " + league + "…";
-    try {
-      const data = await get(
-        "/api/backtest?league=" + encodeURIComponent(league) + "&limit=120",
-      );
-      const fmt = (x, digits = 3) =>
-        x == null ? "–" : Number(x).toFixed(digits);
-      const a = data.models.current,
-        b = data.models.experimental;
-      output.innerHTML = `<p>${esc(data.method)}</p><div class="accuracy-stats"><div><strong>${a.evaluated}</strong><span>Jämförda matcher</span></div><div><strong>${fmt(a.accuracy_pct, 1)}%</strong><span>Nuvarande träff</span></div><div><strong>${fmt(b.accuracy_pct, 1)}%</strong><span>Experiment träff</span></div></div><div class="metric"><span>Brier · nuvarande / experiment</span><strong>${fmt(a.mean_brier)} / ${fmt(b.mean_brier)}</strong></div><div class="metric"><span>Log loss · nuvarande / experiment</span><strong>${fmt(a.mean_log_loss)} / ${fmt(b.mean_log_loss)}</strong></div><p class="muted">${esc(data.warning)}</p>`;
-    } catch (e) {
-      output.textContent = "Kunde inte köra modelltest: " + e.message;
-    } finally {
-      button.disabled = false;
-    }
-  };
-  get(
-    "/api/performance?league=" +
-      encodeURIComponent(state.league === "ALL" ? "NHL" : state.league),
-  )
-    .then((p) => {
-      const el = document.getElementById("perf");
-      if (!el || p.league !== (state.league === "ALL" ? "NHL" : state.league))
-        return;
-      const games = p.recent || [];
-      el.innerHTML = `<p class="muted">${esc(p.method)}</p><div class="accuracy-stats"><div><strong>${p.evaluated}</strong><span>Utvärderade</span></div><div><strong>${p.accuracy_pct === null ? "–" : pct(p.accuracy_pct)}</strong><span>Rätt favorit (1/X/2)</span></div><div><strong>${p.mean_brier === null ? "–" : Number(p.mean_brier).toFixed(3)}</strong><span>Brier-poäng</span></div></div>${
-        !p.evaluated
-          ? '<p class="muted">Inga sparade förhandsprognoser har ännu hunnit avslutas och utvärderas. Statistik byggs upp automatiskt.</p>'
-          : `<h4>Träffsäkerhet per prognosstyrka</h4><div class="accuracy-bins">${p.calibration
-              .filter((b) => b.games)
-              .map(
-                (b) =>
-                  `<div class="metric"><span>${esc(b.range)} % favorit · ${b.games} matcher</span><strong>${pct(b.hit_rate_pct)} rätt</strong></div>`,
-              )
-              .join(
-                "",
-              )}</div><h4>Senaste utvärderade matcher</h4>${games.map((g) => `<div class="metric"><span>${g.correct ? "✓" : "✕"} ${esc(g.home)} – ${esc(g.away)} (${g.score.home}–${g.score.away})<small class="accuracy-sub"> Tips ${esc(g.predicted_outcome)} · Utfall ${esc(g.actual_outcome)}</small></span><strong>${g.correct ? "Rätt" : "Fel"}</strong></div>`).join("")}`
-      }<p class="muted">${p.pending_forecasts} sparade prognoser väntar på resultat.</p>${p.storage_warning ? `<p class="accuracy-warning">⚠️ ${esc(p.storage_warning)}</p>` : ""}`;
-    })
-    .catch(() => {
-      const el = document.getElementById("perf");
-      if (el) el.textContent = "Träffsäkerheten kunde inte hämtas.";
-    });
 }
 async function loadHistory() {
   state.loading = true;
