@@ -66,6 +66,21 @@ def regulation_score(obj, home=None, away=None):
         a = integer(pick(explicit, 'away', 'awayScore', 'awayGoals'))
         if h is not None and a is not None:
             return h, a
+    # SHL game-schedule provides final scores and OT/SO flags, not period scores.
+    # In an OT/SO game, regulation ended level. The winner's final tally
+    # includes one deciding goal; the losing team's tally is the 60-min score.
+    if obj.get('overtime') is True or obj.get('shootout') is True:
+        h = integer(pick(home, 'score', 'goals')) if isinstance(home, dict) else None
+        a = integer(pick(away, 'score', 'goals')) if isinstance(away, dict) else None
+        if h is not None and a is not None and abs(h - a) == 1:
+            return min(h, a), min(h, a)
+        return None
+    # Completed SHL games without OT/SO have regulation final scores.
+    if str(obj.get('state', '')).lower() == 'post-game':
+        h = integer(pick(home, 'score', 'goals')) if isinstance(home, dict) else None
+        a = integer(pick(away, 'score', 'goals')) if isinstance(away, dict) else None
+        if h is not None and a is not None:
+            return h, a
     decided = str(pick(obj, 'decided_in', 'decidedIn', 'decision') or '').lower()
     overtime = pick(obj, 'overtime', 'hasOvertime', 'shootout', 'hasShootout')
     regulation_only = decided in ('regulation', 'regular', '60', '60min') or obj.get('regulationOnly') is True or obj.get('decidedInRegulation') is True
@@ -91,13 +106,13 @@ def normalize_flat(league, data):
         if not isinstance(obj, dict):
             continue
         ident = pick(obj, 'id', 'game_uuid', 'game_cms_id', 'slug', 'uuid', 'gameId')
-        when = pick(obj, 'date', 'scheduled_date_time', 'raw_start_date_time', 'start_date_time', 'startDateTime', 'startTime')
+        when = pick(obj, 'date', 'scheduled_date_time', 'raw_start_date_time', 'start_date_time', 'rawStartDateTime', 'startDateTime', 'startTime')
         home = pick(obj, 'homeTeam', 'home_team', 'homeTeamInfo') or {}
         away = pick(obj, 'awayTeam', 'away_team', 'awayTeamInfo') or {}
         hid = pick(obj, 'home_id', 'home_statnet_id', 'home_team_code', 'home_team_uuid') or pick(home, 'uuid', 'id', 'code')
         aid = pick(obj, 'away_id', 'away_statnet_id', 'away_team_code', 'away_team_uuid') or pick(away, 'uuid', 'id', 'code')
-        hn = pick(obj, 'home_name', 'home_team_name', 'home_team_names_short', 'home_team_code') or pick(home, 'name', 'shortName', 'teamName', 'code')
-        an = pick(obj, 'away_name', 'away_team_name', 'away_team_names_short', 'away_team_code') or pick(away, 'name', 'shortName', 'teamName', 'code')
+        hn = pick(obj, 'home_name', 'home_team_name', 'home_team_names_short', 'home_team_code') or pick(home, 'names', 'name', 'shortName', 'teamName', 'code')
+        an = pick(obj, 'away_name', 'away_team_name', 'away_team_names_short', 'away_team_code') or pick(away, 'names', 'name', 'shortName', 'teamName', 'code')
         if isinstance(hn, dict):
             hn = pick(hn, 'shortSite', 'short', 'full', 'long', 'name')
         if isinstance(an, dict):
@@ -136,7 +151,7 @@ def find_shl_season(payload, end_year):
     for candidate in candidates:
         info = pick(candidate, 'seasonInfo', 'season')
         label = ' '.join(str(v) for v in (pick(candidate, 'seasonName', 'name', 'label'), pick(info, 'name', 'seasonName')) if v)
-        if str(end_year) in label or str(end_year - 1) in label and str(end_year) in label:
+        if (f'{end_year - 1}/{end_year}' in label or str(end_year) in label) and pick(pick(candidate, 'gameType', 'gameTypeInfo'), 'code') == 'regular' and pick(pick(candidate, 'series', 'seriesInfo'), 'code') == 'SHL':
             return candidate
     raise ValueError(f'SHL: hittade ingen säsong för {end_year} i katalogen')
 
@@ -145,7 +160,7 @@ def parse_shl_schedule(payload):
     if isinstance(payload, list):
         return normalize_flat('SHL', payload)
     if isinstance(payload, dict):
-        for key in ('games', 'matches', 'items', 'data'):
+        for key in ('gameInfo', 'games', 'matches', 'items', 'data'):
             node = payload.get(key)
             if isinstance(node, list):
                 return normalize_flat('SHL', node)
