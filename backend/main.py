@@ -2,7 +2,6 @@
 import os
 import json
 import logging
-import sqlite3
 import threading
 
 from datetime import datetime, timedelta, timezone, date
@@ -16,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from model import predict
+from storage import connect as storage_connect, USING_NEON
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,9 +35,7 @@ sync_lock = threading.Lock()
 
 
 def db():
-    conn = sqlite3.connect(DB, timeout=30)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return storage_connect(DB)
 
 
 def init():
@@ -669,7 +667,7 @@ def swehockey_statistics():
     result = {"season": "2026/27", "source": SOURCES,
               "updated_at": max((v['fetched_at'] for v in snapshots.values()), default=None),
               "note": "Säsongsstatistik. Ingen målvakt är bekräftad som starter.",
-              "status": statuses, "storage_persistent": not str(DB).startswith('/tmp/')}
+              "status": statuses, "storage_persistent": USING_NEON or not str(DB).startswith('/tmp/')}
     for category in SOURCES:
         result[category] = json.loads(snapshots[category]['payload']) if category in snapshots else []
     return result
@@ -969,7 +967,7 @@ def performance(league: str = "NHL"):
             for k, (n, hits) in confidence_bins.items()
         ],
         "recent": games[:20],
-        "storage_warning": "Prognoshistoriken kan försvinna vid omstart eftersom DB_PATH använder temporär lagring." if str(DB).startswith('/tmp/') else None,
+        "storage_warning": "Prognoshistoriken kan försvinna vid omstart eftersom DB_PATH använder temporär lagring." if str(DB).startswith('/tmp/') and not USING_NEON else None,
         "method": "1X2 efter 60 minuter. Favoritträff och Brier (lägre är bättre). Endast arkiverade prognoser före matchstart räknas.",
     }
 
@@ -1045,6 +1043,19 @@ def backtest(league: str = "SHL", limit: int = Query(default=120, ge=20, le=300)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/api/storage/status")
+def storage_status():
+    try:
+        with db() as c:
+            count = c.execute("SELECT COUNT(*) AS total FROM matches").fetchone()["total"]
+            snapshot_count = c.execute("SELECT COUNT(*) AS total FROM stats_snapshots").fetchone()["total"]
+        return {"status": "ok", "engine": "neon-postgresql" if USING_NEON else "sqlite",
+                "persistent": USING_NEON or not str(DB).startswith("/tmp/"),
+                "matches": count, "stat_snapshots": snapshot_count}
+    except Exception:
+        log.exception("Database status check failed")
+        raise HTTPException(status_code=503, detail="Database connection failed; see Render logs")
 
 
 app.mount(
