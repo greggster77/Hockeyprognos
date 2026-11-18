@@ -50,39 +50,69 @@ const SWEDISH_CLUBS={
  'Västerås IK':['Västerås IK','Västerås'], 'Västerås':['Västerås IK','Västerås'],
  'Östersunds IK':['Östersunds IK','Östersund'], 'Östersund':['Östersunds IK','Östersund']}
 };
+// Hämta svenska klubbmärken från Wikimedia Commons med flera verifierade sökningar.
+// Endast lyckade resultat cachas; misslyckanden kan provas igen nästa gång.
 const logoMemo=new Map();
+const logoPending=new Map();
 const logoKey=(league,name)=>league+':'+name;
 function normalizedLogoText(v){return String(v).toLocaleLowerCase('sv').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'')}
+function clubAliases(league,name){
+ const clubs=SWEDISH_CLUBS[league]||{};
+ if(clubs[name])return clubs[name];
+ const wanted=normalizedLogoText(name);
+ const found=Object.entries(clubs).find(([key,aliases])=>
+   normalizedLogoText(key)===wanted||aliases.some(a=>normalizedLogoText(a)===wanted));
+ return found?.[1]||null;
+}
+async function commonsLogoSearch(term,aliases){
+ const params=new URLSearchParams({action:'query',format:'json',origin:'*',generator:'search',gsrnamespace:'6',gsrlimit:'40',gsrsearch:term,prop:'imageinfo',iiprop:'url',iiurlwidth:'160'});
+ const response=await fetch('https://commons.wikimedia.org/w/api.php?'+params,{signal:AbortSignal.timeout(10000)});
+ if(!response.ok)throw Error('Commons '+response.status);
+ const data=await response.json();
+ const needles=aliases.map(normalizedLogoText).filter(x=>x.length>=4);
+ const files=Object.values(data.query?.pages||{}).filter(p=>{
+   const title=normalizedLogoText(p.title);
+   return needles.some(n=>title.includes(n)) &&
+     /(logo|logotyp|emblem|crest|vapen|badge)/i.test(p.title) &&
+     /\.(svg|png|webp|jpg|jpeg)$/i.test(p.title) && p.imageinfo?.[0]?.url;
+ });
+ files.sort((a,b)=>Number(/\.svg$/i.test(b.title))-Number(/\.svg$/i.test(a.title)));
+ return files[0]?.imageinfo?.[0]?.thumburl||files[0]?.imageinfo?.[0]?.url||null;
+}
 async function resolveSwedishLogo(league,name){
- const aliases=SWEDISH_CLUBS[league]?.[name];if(!aliases)return null;
- const key=logoKey(league,aliases[0]);if(logoMemo.has(key))return logoMemo.get(key);
- const cached=sessionStorage.getItem('hockey-logo:'+key);if(cached){logoMemo.set(key,cached==='none'?null:cached);return logoMemo.get(key)}
- // MediaWiki Commons tillåter CORS via origin=*. Ingen API-nyckel behövs.
- const query=new URLSearchParams({action:'query',format:'json',origin:'*',generator:'search',gsrnamespace:'6',gsrlimit:'15',gsrsearch:aliases[0]+' logo',prop:'imageinfo',iiprop:'url',iiurlwidth:'160'});
- try{
-  const res=await fetch('https://commons.wikimedia.org/w/api.php?'+query,{signal:AbortSignal.timeout(7000)});
-  if(!res.ok)throw Error('Commons '+res.status);
-  const json=await res.json();const pages=Object.values(json.query?.pages||{});
-  const needles=aliases.map(normalizedLogoText).filter(x=>x.length>=4);
-  const options=pages.filter(p=>{const t=normalizedLogoText(p.title);return needles.some(n=>t.includes(n))&&/(logo|logotyp|emblem|crest|vapen)/i.test(p.title)&&/\.(svg|png|webp|jpg|jpeg)$/i.test(p.title)});
-  options.sort((a,b)=>Number(/\.svg$/i.test(b.title))-Number(/\.svg$/i.test(a.title)));
-  const url=options[0]?.imageinfo?.[0]?.thumburl||options[0]?.imageinfo?.[0]?.url||null;
-  logoMemo.set(key,url);sessionStorage.setItem('hockey-logo:'+key,url||'none');return url;
- }catch(e){return null}
+ const aliases=clubAliases(league,name);if(!aliases)return null;
+ const key=logoKey(league,aliases[0]);
+ if(logoMemo.has(key))return logoMemo.get(key);
+ try{const cached=sessionStorage.getItem('hockey-logo-v2:'+key);if(cached){logoMemo.set(key,cached);return cached}}catch(e){}
+ if(logoPending.has(key))return logoPending.get(key);
+ const task=(async()=>{
+   const searches=[aliases[0]+' logo',aliases[0]+' hockey',aliases[1]+' logo'];
+   for(const term of [...new Set(searches)]){
+     try{
+       const url=await commonsLogoSearch(term,aliases);
+       if(url){logoMemo.set(key,url);try{sessionStorage.setItem('hockey-logo-v2:'+key,url)}catch(e){}return url}
+     }catch(e){console.warn('Kunde inte söka klubbmärke:',term,e)}
+   }
+   return null;
+ })();
+ logoPending.set(key,task);
+ try{return await task}finally{logoPending.delete(key)}
 }
 function hydrateSwedishLogos(){
  document.querySelectorAll('[data-swedish-logo]').forEach(async el=>{
-  const league=el.dataset.league,name=el.dataset.team;
-  const url=await resolveSwedishLogo(league,name);
-  if(!url||!el.isConnected)return;
-  const img=document.createElement('img');img.className='team-logo';img.alt=name+' klubbmärke';img.loading='lazy';img.decoding='async';img.src=url;
-  img.onerror=()=>{img.remove();el.style.display='grid'};
-  img.onload=()=>{if(el.isConnected){el.style.display='none';el.parentNode.insertBefore(img,el)}};
+   if(el.dataset.logoLoading)return;
+   el.dataset.logoLoading='1';
+   const name=el.dataset.team,url=await resolveSwedishLogo(el.dataset.league,name);
+   if(!url||!el.isConnected)return;
+   const img=document.createElement('img');img.className='team-logo';img.alt=name+' klubbmärke';img.loading='lazy';img.decoding='async';
+   img.onload=()=>{if(el.isConnected){el.style.display='none';el.parentNode.insertBefore(img,el)}};
+   img.onerror=()=>{img.remove();el.style.display='grid'};
+   img.src=url;
  });
 }
 function teamMark(name,league){
   const code=league==='NHL'?NHL_CODES[name]:null;
-  if(!code){const swedish=Boolean(SWEDISH_CLUBS[league]?.[name]);return `<span class="team-initial" ${swedish?`data-swedish-logo="1" data-league="${esc(league)}" data-team="${esc(name)}"`:''} aria-hidden="true">${esc(name).slice(0,2).toUpperCase()}</span>`;}
+  if(!code){const swedish=Boolean(clubAliases(league,name));return `<span class="team-initial" ${swedish?`data-swedish-logo="1" data-league="${esc(league)}" data-team="${esc(name)}"`:''} aria-hidden="true">${esc(name).slice(0,2).toUpperCase()}</span>`;}
   return `<img class="team-logo" src="https://assets.nhle.com/logos/nhl/svg/${code}_light.svg" alt="${esc(name)} klubbmärke" loading="lazy" decoding="async" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'"><span class="team-initial" style="display:none" aria-hidden="true">${esc(code)}</span>`;
 }
 function notice(){return '<section class="panel notice">ℹ️ Prognoser är statistiska uppskattningar, inte garantier. 1X2 avser resultatet efter 60 minuter – utan förlängning och straffar.</section>'}
