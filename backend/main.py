@@ -731,6 +731,45 @@ def matches(
         ]
 
 
+@app.get("/api/history")
+def history(
+    league: str = "NHL",
+    team: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Finished regulation-time matches from the current season.
+
+    This is match history, not retroactively manufactured predictions.
+    """
+    if league not in LEAGUES:
+        raise HTTPException(400, "Okänd liga")
+    season_start = date.today().year if date.today().month >= 9 else date.today().year - 1
+    filters = ["league=?", "status='FINISHED'", "home_goals IS NOT NULL", "away_goals IS NOT NULL", "substr(date,1,10)>=?"]
+    args = [league, f"{season_start}-10-01"]
+    if team:
+        filters.append("(home_id=? OR away_id=?)")
+        args.extend([team, team])
+    where = " AND ".join(filters)
+    with db() as c:
+        total = c.execute("SELECT COUNT(*) FROM matches WHERE " + where, args).fetchone()[0]
+        rows = c.execute("SELECT * FROM matches WHERE " + where + " ORDER BY date DESC, id DESC LIMIT ? OFFSET ?", args + [limit, offset]).fetchall()
+        teams = c.execute("""SELECT team_id, MAX(team_name) AS team_name FROM (
+            SELECT home_id AS team_id, home_name AS team_name FROM matches WHERE league=? AND status='FINISHED'
+            UNION ALL
+            SELECT away_id AS team_id, away_name AS team_name FROM matches WHERE league=? AND status='FINISHED'
+        ) GROUP BY team_id ORDER BY team_name""", (league, league)).fetchall()
+        return {
+            "league": league,
+            "season": f"{season_start}/{str(season_start+1)[-2:]}",
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "teams": [{"id": r["team_id"], "name": r["team_name"]} for r in teams],
+            "matches": [serialize(c, r) for r in rows],
+        }
+
+
 @app.get("/api/matches/{match_id:path}")
 def detail(match_id: str):
     with db() as c:
