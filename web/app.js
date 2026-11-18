@@ -25,6 +25,9 @@ const state = {
   formData: {},
   formExpanded: {},
   formLoading: false,
+  goalies: null,
+  goalieError: "",
+  goalieLoading: false,
 };
 state.date = state.date.split("-").join("-");
 const esc = (x) =>
@@ -374,13 +377,44 @@ async function loadTeamForms(m) {
     }
   }
 }
+async function loadGoalies(m) {
+  if (m.league !== "SHL") return;
+  state.goalieLoading = true;
+  state.goalies = null;
+  state.goalieError = "";
+  render();
+  try {
+    const data = await get("/api/shl/goalkeepers");
+    if (state.detail?.id !== m.id) return;
+    state.goalies = data;
+  } catch (e) {
+    if (state.detail?.id === m.id) state.goalieError = e.message;
+  } finally {
+    if (state.detail?.id === m.id) {
+      state.goalieLoading = false;
+      render();
+    }
+  }
+}
+function goaliePanel() {
+  const rows = state.goalies?.goalkeepers || [];
+  const link = state.goalies?.source || "https://www.shl.se/game-stats/goalkeepers/summary";
+  return `<section class="panel"><h3>🥅 SHL · Målvaktsstatistik</h3>
+    <p class="muted">Officiell säsongsstatistik. Startande målvakter är ännu inte verifierade och påverkar inte prognosen.</p>
+    ${state.goalieLoading ? '<p class="muted">Hämtar målvaktsstatistik…</p>' : state.goalieError ? `<p class="muted">Kunde inte hämta statistik: ${esc(state.goalieError)}</p>` : rows.length ? `<div class="metric"><span>Målvakt</span><strong>SVS% · GAA</strong></div>${rows.slice(0,12).map(g=>`<div class="metric"><span>${esc(g.name)}${g.team ? ` · ${esc(g.team)}` : ""}</span><strong>${esc(g.save_pct)} % · ${esc(g.gaa)}</strong></div>`).join("")}` : '<p class="muted">Ingen verifierbar statistik kunde läsas automatiskt just nu.</p>'}
+    <p><a href="${esc(link)}" target="_blank" rel="noopener noreferrer">Visa officiell målvaktsstatistik hos SHL ↗</a></p>
+  </section>`;
+}
 function showDetail(m) {
   state.detail = m;
   state.formExpanded = {};
   state.formData = {};
   state.formError = "";
+  state.goalies = null;
+  state.goalieError = "";
   render();
   loadTeamForms(m);
+  loadGoalies(m);
 }
 function bindFormButtons() {
   document.querySelectorAll("[data-form-team]").forEach(
@@ -398,7 +432,7 @@ function render() {
     const m = state.detail,
       p = m.prediction,
       d = p?.details;
-    root.innerHTML = `<button class="back" id="back">← Till matcher</button><div class="eyebrow">${esc(m.league)} · ${esc(formatDate(m.date))}</div><h1 class="title">${esc(displayTeamName(m.home, m.league))} – ${esc(displayTeamName(m.away, m.league))}</h1>${card(m)}${m.league === "NHL" || m.league === "SHL" ? `<h2 class="form-section-title">Lagform · senaste ${m.league === "SHL" ? "10" : "20"} matcher</h2>${state.formError ? `<p class="muted">${esc(state.formError)}</p>` : ""}${teamFormCard(m.home, m.league)}${teamFormCard(m.away, m.league)}` : ""}${p ? `<section class="panel"><h3>Matchanalys</h3><div class="metric"><span>Förväntade mål hemma</span><strong>${p.expected_home}</strong></div><div class="metric"><span>Förväntade mål borta</span><strong>${p.expected_away}</strong></div><div class="metric"><span>Elo hemma / borta</span><strong>${d.home_elo} / ${d.away_elo}</strong></div><div class="metric"><span>Hemmaform (mål för/emot)</span><strong>${d.home_form.scored} / ${d.home_form.conceded} (${d.home_form.played} matcher)</strong></div><div class="metric"><span>Bortaform (mål för/emot)</span><strong>${d.away_form.scored} / ${d.away_form.conceded} (${d.away_form.played} matcher)</strong></div><h3>Troligaste resultat efter 60 min</h3>${d.top_scores.map((s) => `<div class="metric"><span>${esc(s.score)}</span><strong>${pct(s.probability)}</strong></div>`).join("")}</section>` : ""}${notice()}`;
+    root.innerHTML = `<button class="back" id="back">← Till matcher</button><div class="eyebrow">${esc(m.league)} · ${esc(formatDate(m.date))}</div><h1 class="title">${esc(displayTeamName(m.home, m.league))} – ${esc(displayTeamName(m.away, m.league))}</h1>${card(m)}${m.league === "SHL" ? goaliePanel() : ""}${m.league === "NHL" || m.league === "SHL" ? `<h2 class="form-section-title">Lagform · senaste ${m.league === "SHL" ? "10" : "20"} matcher</h2>${state.formError ? `<p class="muted">${esc(state.formError)}</p>` : ""}${teamFormCard(m.home, m.league)}${teamFormCard(m.away, m.league)}` : ""}${p ? `<section class="panel"><h3>Matchanalys</h3><div class="metric"><span>Förväntade mål hemma</span><strong>${p.expected_home}</strong></div><div class="metric"><span>Förväntade mål borta</span><strong>${p.expected_away}</strong></div><div class="metric"><span>Elo hemma / borta</span><strong>${d.home_elo} / ${d.away_elo}</strong></div><div class="metric"><span>Hemmaform (mål för/emot)</span><strong>${d.home_form.scored} / ${d.home_form.conceded} (${d.home_form.played} matcher)</strong></div><div class="metric"><span>Bortaform (mål för/emot)</span><strong>${d.away_form.scored} / ${d.away_form.conceded} (${d.away_form.played} matcher)</strong></div><h3>Troligaste resultat efter 60 min</h3>${d.top_scores.map((s) => `<div class="metric"><span>${esc(s.score)}</span><strong>${pct(s.probability)}</strong></div>`).join("")}</section>` : ""}${notice()}`;
     hydrateSwedishLogos();
     document.getElementById("back").onclick = () => {
       state.detail = null;
@@ -527,7 +561,7 @@ function render() {
     )
     .join(
       "",
-    )}</div><div class="controls"><input class="date" type="date" id="date" value="${state.date}"><button class="chip" id="refresh">↻</button></div>${state.error ? `<section class="panel warning">⚠️ ${esc(state.error)}</section>` : ""}${state.loading ? '<section class="panel empty">Hämtar matcher…</section>' : state.matches.length ? state.matches.map(card).join("") : '<section class="panel empty"><strong>Inga verifierade matcher hittades</strong><p class="muted">Välj ett annat datum eller kontrollera datakällornas status.</p></section>'}${state.leagues
+    )}<button class="chip" id="open-analysis">🧪 Modellanalys</button></div><div class="controls"><input class="date" type="date" id="date" value="${state.date}"><button class="chip" id="refresh">↻</button></div>${state.error ? `<section class="panel warning">⚠️ ${esc(state.error)}</section>` : ""}${state.loading ? '<section class="panel empty">Hämtar matcher…</section>' : state.matches.length ? state.matches.map(card).join("") : '<section class="panel empty"><strong>Inga verifierade matcher hittades</strong><p class="muted">Välj ett annat datum eller kontrollera datakällornas status.</p></section>'}${state.leagues
     .filter(
       (l) => l.error && (state.league === "ALL" || l.league === state.league),
     )
@@ -537,7 +571,7 @@ function render() {
     )
     .join(
       "",
-    )}${notice()}<div class="controls"><button class="chip" id="open-analysis">🧪 Modellanalys · SHL / NHL</button></div>`;
+    )}${notice()}`;
   hydrateSwedishLogos();
   document.getElementById("theme").onclick = () => {
     state.light = !state.light;

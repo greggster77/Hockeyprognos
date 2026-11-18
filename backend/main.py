@@ -602,6 +602,21 @@ app = FastAPI(
 # No guessed image URL is generated: only URLs actually supplied by the API are used.
 _shl_logo_cache = {"expires": 0.0, "result": None}
 
+@app.get("/api/shl/goalkeepers")
+async def shl_goalkeepers():
+    from shl_goalkeepers import SOURCE, parse_goalkeepers
+    try:
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+            response = await client.get(SOURCE, headers={"User-Agent": "Hockeyprognos/2.2 (public stats)"})
+            response.raise_for_status()
+        rows = parse_goalkeepers(response.text)
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("SHL goalkeeper statistics unavailable: %s", exc)
+        rows = []
+    return {"source": SOURCE, "goalkeepers": rows, "confirmed_starters": False,
+            "note": "Public season statistics only. No verified starters."}
+
+
 @app.get("/api/shl/logos")
 def shl_logos():
     import time
