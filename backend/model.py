@@ -67,7 +67,7 @@ def dixon_coles_factor(home_goals, away_goals, home_rate, away_rate, rho=-0.08):
 
 
 def predict(history, home_id, away_id, league="NHL", variant="current"):
-    if variant not in ("current", "experimental"):
+    if variant not in ("current", "experimental", "h2h"):
         raise ValueError("Okänd modellvariant")
     # history contains ONLY completed matches before the prediction date,
     # sorted chronologically, within the current NHL season.
@@ -109,6 +109,21 @@ def predict(history, home_id, away_id, league="NHL", variant="current"):
     elo_factor = max(.75, min(1.25, 10 ** ((ratings[home_id] - ratings[away_id]) / 1600)))
     xh = max(.15, min(4.5, league_home * h_attack * a_def * elo_factor))
     xa = max(.15, min(4.5, league_away * a_attack * h_def / elo_factor))
+    h2h_info = {"meetings": 0, "adjustment": 0.0}
+    if variant == "h2h" and league == "SHL":
+        # Shrink head-to-head signal strongly; cap influence to avoid overfitting.
+        # Completed history passed by walk-forward backtest is strictly pre-match.
+        meetings = [m for m in history if
+                    (m.home_id == home_id and m.away_id == away_id) or
+                    (m.home_id == away_id and m.away_id == home_id)][-8:]
+        if meetings:
+            diffs = [(m.home_goals - m.away_goals) if m.home_id == home_id
+                     else (m.away_goals - m.home_goals) for m in meetings]
+            weighted = sum(d * (i + 1) for i, d in enumerate(diffs)) / sum(range(1, len(diffs) + 1))
+            adjustment = max(-0.07, min(0.07, weighted * len(meetings) / (len(meetings) + 12) * 0.08))
+            xh = max(.15, min(4.5, xh * (1 + adjustment)))
+            xa = max(.15, min(4.5, xa * (1 - adjustment)))
+            h2h_info = {"meetings": len(meetings), "adjustment": round(adjustment, 4)}
     matrix = [
         (i, j, poisson(i, xh) * poisson(j, xa) *
          (dixon_coles_factor(i, j, xh, xa) if variant == "experimental" else 1.0))
@@ -121,7 +136,7 @@ def predict(history, home_id, away_id, league="NHL", variant="current"):
     mass = sum(p for _, _, p in matrix)
     top = sorted(matrix, key=lambda v: v[2], reverse=True)[:5]
     return dict(home_win=h, draw=d, away_win=a, expected_home=round(xh, 2), expected_away=round(xa, 2), details={
-        "top_scores": [{"score": f"{i}–{j}", "probability": round(p / mass * 100, 2)} for i, j, p in top],
+        "h2h": h2h_info, "top_scores": [{"score": f"{i}–{j}", "probability": round(p / mass * 100, 2)} for i, j, p in top],
         "home_elo": round(ratings[home_id]), "away_elo": round(ratings[away_id]),
         "home_form": {"played": hf["played"], "scored": round(hf["gf"] * hf["played"], 1), "conceded": round(hf["ga"] * hf["played"], 1)},
         "away_form": {"played": af["played"], "scored": round(af["gf"] * af["played"], 1), "conceded": round(af["ga"] * af["played"], 1)},

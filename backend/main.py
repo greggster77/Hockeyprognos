@@ -90,6 +90,19 @@ def init():
             evaluated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS stats_snapshots (
+            category TEXT PRIMARY KEY,
+            fetched_at TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            record_count INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS stats_fetch_status (
+            category TEXT PRIMARY KEY,
+            attempted_at TEXT NOT NULL,
+            http_status INTEGER,
+            record_count INTEGER NOT NULL,
+            error TEXT
+        );
         CREATE TABLE IF NOT EXISTS sync_status (
             league TEXT PRIMARY KEY,
             updated_at TEXT,
@@ -578,7 +591,12 @@ async def lifespan(app):
         replace_existing=True,
     )
 
+    scheduler.add_job(refresh_shl_stats, "interval", minutes=30,
+                      id="shl-stats", max_instances=1, replace_existing=True)
+    scheduler.add_job(refresh_model_evaluation, "interval", hours=24,
+                      id="model-evaluation", max_instances=1, replace_existing=True)
     scheduler.start()
+    threading.Thread(target=refresh_shl_stats, name="initial-shl-stats", daemon=True).start()
 
     threading.Thread(
         target=sync,
@@ -602,35 +620,63 @@ app = FastAPI(
 # No guessed image URL is generated: only URLs actually supplied by the API are used.
 _shl_logo_cache = {"expires": 0.0, "result": None}
 
-# Short-lived cache: official source is not queried on every browser render.
-_swehockey_cache = {"expires": 0.0, "data": None}
+# Statistics are fetched independently of browser traffic and stored as last-known-good
+# snapshots. On Render's free /tmp filesystem this is NOT durable across restarts.
+from swehockey_stats import SOURCES, parse_standings, parse_scorers, parse_goalies, inspect_tables
+
+_STATS_PARSERS = {"standings": parse_standings, "scorers": parse_scorers, "goalies": parse_goalies}
+_stats_lock = threading.Lock()
+
+def refresh_shl_stats():
+    if not _stats_lock.acquire(blocking=False):
+        return
+    try:
+        with httpx.Client(timeout=18.0, follow_redirects=True,
+                          headers={"User-Agent": "Mozilla/5.0 Hockeyprognos/3.0"}) as client:
+            for category, url in SOURCES.items():
+                status, error, items = None, None, []
+                try:
+                    response = client.get(url)
+                    status = response.status_code
+                    response.raise_for_status()
+                    items = _STATS_PARSERS[category](response.text)
+                    if not items:
+                        diag = inspect_tables(response.text)
+                        error = "Inga matchande tabellrader: " + json.dumps(diag, ensure_ascii=False)[:1000]
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {str(exc)[:250]}"
+                with db() as c:
+                    timestamp = now()
+                    c.execute("""INSERT INTO stats_fetch_status VALUES (?,?,?,?,?)
+                        ON CONFLICT(category) DO UPDATE SET attempted_at=excluded.attempted_at,
+                        http_status=excluded.http_status, record_count=excluded.record_count,
+                        error=excluded.error""", (category, timestamp, status, len(items), error))
+                    if items:
+                        c.execute("""INSERT INTO stats_snapshots VALUES (?,?,?,?)
+                            ON CONFLICT(category) DO UPDATE SET fetched_at=excluded.fetched_at,
+                            payload=excluded.payload, record_count=excluded.record_count""",
+                            (category, timestamp, json.dumps(items, ensure_ascii=False), len(items)))
+                if error:
+                    log.warning("SHL stats %s: %s", category, error)
+    finally:
+        _stats_lock.release()
 
 @app.get("/api/shl/statistics")
-async def swehockey_statistics():
-    import asyncio
-    import time
-    from datetime import datetime, timezone
-    from swehockey_stats import SOURCES, parse_standings, parse_scorers, parse_goalies
-    now = time.monotonic()
-    if _swehockey_cache["data"] is not None and now < _swehockey_cache["expires"]:
-        return _swehockey_cache["data"]
-    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
-        async def fetch(url):
-            try:
-                response = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; Hockeyprognos/2.3)"})
-                response.raise_for_status()
-                return response.text
-            except httpx.HTTPError as exc:
-                log.warning("Swehockey statistics fetch failed: %s", exc)
-                return ""
-        pages = await asyncio.gather(*(fetch(url) for url in SOURCES.values()))
-    parsers = [parse_standings, parse_scorers, parse_goalies]
-    results = {key: fn(html) for key, fn, html in zip(SOURCES, parsers, pages)}
-    result = {"season": "2026/27", "source": SOURCES, "updated_at": datetime.now(timezone.utc).isoformat(),
-              **results, "note": "Säsongsstatistik. Ingen målvakt är bekräftad som starter."}
-    _swehockey_cache.update(data=result, expires=now+(600 if all(results.values()) else 90))
+def swehockey_statistics():
+    with db() as c:
+        snapshots = {r['category']: dict(r) for r in c.execute("SELECT * FROM stats_snapshots")}
+        statuses = {r['category']: dict(r) for r in c.execute("SELECT * FROM stats_fetch_status")}
+    result = {"season": "2026/27", "source": SOURCES,
+              "updated_at": max((v['fetched_at'] for v in snapshots.values()), default=None),
+              "note": "Säsongsstatistik. Ingen målvakt är bekräftad som starter.",
+              "status": statuses, "storage_persistent": not str(DB).startswith('/tmp/')}
+    for category in SOURCES:
+        result[category] = json.loads(snapshots[category]['payload']) if category in snapshots else []
     return result
 
+@app.post("/api/shl/statistics/refresh", include_in_schema=False)
+def manual_refresh_disabled():
+    raise HTTPException(status_code=403, detail="Automatisk uppdatering är aktiverad")
 
 @app.get("/api/shl/goalkeepers")
 async def shl_goalkeepers():
@@ -963,7 +1009,7 @@ def backtest(league: str = "SHL", limit: int = Query(default=120, ge=20, le=300)
     eligible.sort(key=lambda item: (item[0]['date'], item[0]['id']))
     eligible = eligible[-limit:]
     results = {name: {"evaluated": 0, "correct": 0, "brier_sum": 0.0, "log_loss_sum": 0.0}
-               for name in ('current', 'experimental')}
+               for name in (('current', 'experimental', 'h2h') if league == 'SHL' else ('current', 'experimental'))}
     import math
     for match, prior in eligible:
         history = [HistoricalMatch(r) for r in prior]
@@ -1009,3 +1055,25 @@ app.mount(
     ),
     name="web",
 )
+# Cached daily walk-forward evaluation, kept separate from live predictions.
+def refresh_model_evaluation():
+    try:
+        report = backtest(league="SHL", limit=120)
+        with db() as c:
+            c.execute("""CREATE TABLE IF NOT EXISTS model_evaluations
+                (league TEXT PRIMARY KEY, updated_at TEXT NOT NULL, payload TEXT NOT NULL)""")
+            c.execute("""INSERT INTO model_evaluations VALUES (?,?,?)
+                ON CONFLICT(league) DO UPDATE SET updated_at=excluded.updated_at, payload=excluded.payload""",
+                ("SHL", now(), json.dumps(report, ensure_ascii=False)))
+    except Exception:
+        log.exception("Daily model evaluation failed")
+
+@app.get("/api/model-evaluation/latest")
+def latest_model_evaluation():
+    with db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS model_evaluations
+            (league TEXT PRIMARY KEY, updated_at TEXT NOT NULL, payload TEXT NOT NULL)""")
+        row = c.execute("SELECT * FROM model_evaluations WHERE league='SHL'").fetchone()
+    return {"updated_at": row['updated_at'] if row else None,
+            "report": json.loads(row['payload']) if row else None,
+            "note": "Testmodell; liveprognoserna är oförändrade."}
