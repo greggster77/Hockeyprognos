@@ -71,6 +71,18 @@ def init():
             FOREIGN KEY(match_id) REFERENCES matches(id)
         );
 
+        CREATE TABLE IF NOT EXISTS forecast_archive (
+            match_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            home_win REAL NOT NULL,
+            draw REAL NOT NULL,
+            away_win REAL NOT NULL,
+            expected_home REAL,
+            expected_away REAL,
+            details TEXT NOT NULL,
+            FOREIGN KEY(match_id) REFERENCES matches(id)
+        );
+
         CREATE TABLE IF NOT EXISTS prediction_results (
             match_id TEXT PRIMARY KEY,
             actual TEXT NOT NULL,
@@ -476,6 +488,29 @@ def recompute():
             except ValueError:
                 continue
 
+            # Archive the latest genuine pregame forecast for later evaluation.
+            # No forecasts are generated for started/finished games.
+            c.execute(
+                """
+                INSERT INTO forecast_archive
+                VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT(match_id) DO UPDATE SET
+                    created_at=excluded.created_at,
+                    home_win=excluded.home_win,
+                    draw=excluded.draw,
+                    away_win=excluded.away_win,
+                    expected_home=excluded.expected_home,
+                    expected_away=excluded.expected_away,
+                    details=excluded.details
+                """,
+                (
+                    match["id"], now(), prediction["home_win"],
+                    prediction["draw"], prediction["away_win"],
+                    prediction["expected_home"], prediction["expected_away"],
+                    json.dumps(prediction["details"]),
+                ),
+            )
+
             c.execute(
                 """
                 INSERT INTO predictions
@@ -501,10 +536,12 @@ def recompute():
                 p.draw,
                 p.away_win
             FROM matches m
-            JOIN predictions p
+            JOIN forecast_archive p
               ON p.match_id=m.id
             WHERE m.status='FINISHED'
               AND m.home_goals IS NOT NULL
+              AND m.away_goals IS NOT NULL
+              AND p.created_at < m.date
               AND NOT EXISTS (
                   SELECT 1
                   FROM prediction_results r
@@ -791,21 +828,69 @@ def detail(match_id: str):
 
 
 @app.get("/api/performance")
-def performance():
+def performance(league: str = "NHL"):
+    if league not in LEAGUES:
+        raise HTTPException(status_code=400, detail="Okänd liga")
     with db() as c:
-        result = c.execute(
+        rows = c.execute(
             """
-            SELECT
-                COUNT(*) n,
-                AVG(brier) b
-            FROM prediction_results
-            """
-        ).fetchone()
+            SELECT m.id, m.date, m.home_name, m.away_name,
+                   m.home_goals, m.away_goals,
+                   a.created_at, a.home_win, a.draw, a.away_win,
+                   r.actual, r.brier
+            FROM prediction_results r
+            JOIN matches m ON m.id=r.match_id
+            JOIN forecast_archive a ON a.match_id=r.match_id
+            WHERE m.league=? AND a.created_at < m.date
+            ORDER BY m.date DESC
+            """, (league,)
+        ).fetchall()
+        pending = c.execute(
+            """SELECT COUNT(*) AS n FROM forecast_archive a
+               JOIN matches m ON m.id=a.match_id
+               WHERE m.league=? AND m.status!='FINISHED'""", (league,)
+        ).fetchone()["n"]
 
-        return {
-            "evaluated": result["n"],
-            "mean_brier": result["b"],
-        }
+    total = len(rows)
+    correct = 0
+    confidence_bins = {"0-39": [0, 0], "40-49": [0, 0],
+                       "50-59": [0, 0], "60-69": [0, 0], "70-100": [0, 0]}
+    games = []
+    for row in rows:
+        probs = {"1": row["home_win"], "X": row["draw"], "2": row["away_win"]}
+        pick = max(probs, key=probs.get)
+        hit = pick == row["actual"]
+        correct += int(hit)
+        confidence = probs[pick]
+        key = ("0-39" if confidence < 40 else "40-49" if confidence < 50
+               else "50-59" if confidence < 60 else "60-69" if confidence < 70
+               else "70-100")
+        confidence_bins[key][0] += 1
+        confidence_bins[key][1] += int(hit)
+        games.append({
+            "id": row["id"], "date": row["date"],
+            "home": row["home_name"], "away": row["away_name"],
+            "score": {"home": row["home_goals"], "away": row["away_goals"]},
+            "prediction": probs, "predicted_outcome": pick,
+            "actual_outcome": row["actual"], "correct": hit,
+            "brier": round(row["brier"], 4),
+            "forecast_created_at": row["created_at"],
+        })
+    return {
+        "league": league, "evaluated": total,
+        "correct": correct,
+        "accuracy_pct": round(100 * correct / total, 1) if total else None,
+        "mean_brier": round(sum(r["brier"] for r in rows) / total, 4) if total else None,
+        "pending_forecasts": pending,
+        "calibration": [
+            {"range": k, "games": n, "hits": hits,
+             "hit_rate_pct": round(100 * hits / n, 1) if n else None}
+            for k, (n, hits) in confidence_bins.items()
+        ],
+        "recent": games[:20],
+        "storage_warning": "Prognoshistoriken kan försvinna vid omstart eftersom DB_PATH använder temporär lagring." if str(DB).startswith('/tmp/') else None,
+        "method": "1X2 efter 60 minuter. Favoritträff och Brier (lägre är bättre). Endast arkiverade prognoser före matchstart räknas.",
+    }
 
 
 @app.get("/health")
