@@ -4,32 +4,56 @@ import re
 
 BASE = 'https://stats.swehockey.se'
 SOURCES = {
-    'standings': BASE + '/ScheduleAndResults/Overview/20961',
+    'standings': BASE + '/ScheduleAndResults/Standings/20961',
     'scorers': BASE + '/Players/Statistics/ScoringLeaders/20961',
     'goalies': BASE + '/Players/Statistics/LeadingGoaliesSVS/20961',
 }
 
 class Tables(HTMLParser):
+    """Read nested Swehockey HTML tables independently, including nested cells."""
     def __init__(self):
-        super().__init__(); self.tables=[]; self.table=None; self.row=None; self.cell=None; self.depth=0
-    def handle_starttag(self,tag,attrs):
-        if tag=='table':
-            self.depth+=1
-            if self.depth==1:self.table=[]
-        elif self.depth==1 and tag=='tr':self.row=[]
-        elif self.row is not None and tag in ('td','th'):self.cell=[]
-        elif self.cell is not None and tag=='br':self.cell.append(' ')
-    def handle_data(self,data):
-        if self.cell is not None:self.cell.append(data)
-    def handle_endtag(self,tag):
-        if tag in ('td','th') and self.cell is not None:
-            self.row.append(' '.join(''.join(self.cell).split()));self.cell=None
-        elif tag=='tr' and self.row is not None:
-            if self.row:self.table.append(self.row)
-            self.row=None
-        elif tag=='table' and self.depth:
-            self.depth-=1
-            if self.depth==0 and self.table:self.tables.append(self.table);self.table=None
+        super().__init__(convert_charrefs=True)
+        self.tables = []
+        self.stack = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'table':
+            table = {'rows': [], 'row': None, 'cell': None, 'cell_depth': 0}
+            self.stack.append(table)
+            self.tables.append(table['rows'])
+        elif self.stack:
+            table = self.stack[-1]
+            if tag == 'tr':
+                table['row'] = []
+            elif tag in ('td', 'th') and table['row'] is not None:
+                if table['cell'] is None:
+                    table['cell'] = []
+                    table['cell_depth'] = 1
+                else:
+                    table['cell_depth'] += 1
+            elif tag == 'br' and table['cell'] is not None:
+                table['cell'].append(' ')
+
+    def handle_data(self, data):
+        if self.stack and self.stack[-1]['cell'] is not None:
+            self.stack[-1]['cell'].append(data)
+
+    def handle_endtag(self, tag):
+        if not self.stack:
+            return
+        table = self.stack[-1]
+        if tag in ('td', 'th') and table['cell'] is not None:
+            table['cell_depth'] -= 1
+            if table['cell_depth'] == 0:
+                table['row'].append(' '.join(''.join(table['cell']).split()))
+                table['cell'] = None
+        elif tag == 'tr' and table['row'] is not None:
+            if table['row']:
+                table['rows'].append(table['row'])
+            table['row'] = None
+        elif tag == 'table':
+            self.stack.pop()
+
 
 def _number(s):
     s=s.replace(',','.').replace('%','').strip()
