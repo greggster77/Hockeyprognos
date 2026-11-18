@@ -253,10 +253,19 @@ def fetch_nhl():
     Use only official NHL API data.
     """
 
-    start = date.today() - timedelta(days=35)
-    end = date.today() + timedelta(days=21)
+    today = date.today()
+    # Current NHL season starts in autumn. Include all its regular-season
+    # games, so every team can build a 20-game form window.
+    season_year = today.year if today.month >= 9 else today.year - 1
+    start = date(season_year, 10, 1)
+    end = today + timedelta(days=21)
 
     games = {}
+    # Avoid repeatedly downloading detailed scoring for completed games.
+    with db() as c:
+        cached_final = {row["id"]: dict(row) for row in c.execute(
+            "SELECT * FROM matches WHERE league='NHL' AND status='FINISHED'"
+        )}
 
     with httpx.Client(
         timeout=20,
@@ -294,6 +303,13 @@ def fetch_nhl():
 
             if state in ("FINAL", "OFF"):
                 try:
+                    cached = cached_final.get("NHL:" + str(game["id"]))
+                    if cached and cached["home_goals"] is not None and cached["away_goals"] is not None:
+                        output.append({key: cached[key] for key in (
+                            "id", "date", "home_id", "away_id", "home_name", "away_name",
+                            "home_goals", "away_goals", "status")})
+                        finished += 1
+                        continue
                     url = (
                         "https://api-web.nhle.com/v1/"
                         f"gamecenter/{game['id']}/landing"
@@ -341,8 +357,69 @@ def fetch_nhl():
 
 
 def fetch_swedish(league):
-    from swedish_sources import fetch
-    return fetch(league)
+    url = os.getenv(f"{league}_FEED_URL")
+
+    if not url:
+        raise ValueError(
+            "Ingen datakälla är konfigurerad för "
+            + LEAGUES[league]
+        )
+
+    headers = {}
+
+    token = os.getenv(f"{league}_FEED_TOKEN")
+
+    if token:
+        headers["Authorization"] = "Bearer " + token
+
+    with httpx.Client(timeout=25) as client:
+        response = client.get(url, headers=headers)
+        response.raise_for_status()
+        items = response.json()
+
+    if not isinstance(items, list):
+        raise ValueError(
+            "Datakällan måste returnera en JSON-lista"
+        )
+
+    output = []
+
+    for item in items:
+        required = (
+            "id",
+            "date",
+            "home_id",
+            "away_id",
+            "home_name",
+            "away_name",
+            "status",
+        )
+
+        for key in required:
+            if key not in item:
+                raise ValueError("Saknat fält: " + key)
+
+        if item["status"] == "FINISHED":
+            if (
+                item.get("home_goals") is None
+                or item.get("away_goals") is None
+            ):
+                raise ValueError(
+                    "Resultat efter 60 minuter saknas"
+                )
+
+        output.append({
+            **item,
+            "id": league + ":" + str(item["id"]),
+            "home_id": (
+                league + ":" + str(item["home_id"])
+            ),
+            "away_id": (
+                league + ":" + str(item["away_id"])
+            ),
+        })
+
+    return output
 
 
 class HistoricalMatch:
@@ -367,28 +444,22 @@ def recompute():
         ).fetchall()
 
         for match in upcoming:
-            existing = c.execute(
-                """
-                SELECT 1 FROM predictions
-                WHERE match_id=?
-                """,
-                (match["id"],),
-            ).fetchone()
-
-            if existing:
-                continue
-
+            # Refresh upcoming forecasts after each import, so newly finished
+            # matches affect probabilities. Historical predictions remain frozen.
+            c.execute("DELETE FROM predictions WHERE match_id=?", (match["id"],))
             history = c.execute(
                 """
                 SELECT * FROM matches
                 WHERE league=?
                   AND status='FINISHED'
                   AND date<?
+                  AND date>=?
                 ORDER BY date
                 """,
                 (
                     match["league"],
                     match["date"],
+                    f"{(datetime.fromisoformat(match['date'].replace('Z', '+00:00')).year if datetime.fromisoformat(match['date'].replace('Z', '+00:00')).month >= 9 else datetime.fromisoformat(match['date'].replace('Z', '+00:00')).year - 1)}-10-01",
                 ),
             ).fetchall()
 
