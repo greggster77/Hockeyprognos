@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import threading
+import time
 
 from datetime import datetime, timedelta, timezone, date
 from pathlib import Path
@@ -32,6 +33,17 @@ log = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler(timezone="UTC")
 sync_lock = threading.Lock()
+
+# Small in-process read cache. It avoids repeated Neon connections and SQL
+# queries when many users request the same league/date window.
+MATCH_RESPONSE_TTL = 20
+_match_response_cache = {}
+_match_response_lock = threading.Lock()
+
+def invalidate_match_response_cache():
+    with _match_response_lock:
+        _match_response_cache.clear()
+
 
 
 def db():
@@ -157,6 +169,7 @@ def store(league, games):
             (league, now()),
         )
 
+    invalidate_match_response_cache()
     log.info("Stored %s matches for %s", len(games), league)
 
 
@@ -574,6 +587,7 @@ def sync():
                 error(league, exc)
 
         recompute()
+        invalidate_match_response_cache()
 
     finally:
         sync_lock.release()
@@ -814,6 +828,11 @@ def matches(
         )
 
     day = day or date.today()
+    cache_key = (day.isoformat(), days, league)
+    with _match_response_lock:
+        cached = _match_response_cache.get(cache_key)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
 
     end = (
         day + timedelta(days=days)
@@ -851,10 +870,19 @@ def matches(
                 f"SELECT * FROM predictions WHERE match_id IN ({placeholders})", ids
             ).fetchall()
             predictions_by_id = {p["match_id"]: p for p in prediction_rows}
-        return [
+        result = [
             serialize(c, match, predictions_by_id.get(match["id"]), preloaded=True)
             for match in rows
         ]
+    with _match_response_lock:
+        _match_response_cache[cache_key] = (time.monotonic() + MATCH_RESPONSE_TTL, result)
+        if len(_match_response_cache) > 100:
+            expired = [k for k, v in _match_response_cache.items() if v[0] <= time.monotonic()]
+            for k in expired:
+                _match_response_cache.pop(k, None)
+            if len(_match_response_cache) > 100:
+                _match_response_cache.pop(next(iter(_match_response_cache)))
+    return result
 
 
 @app.get("/api/history")
