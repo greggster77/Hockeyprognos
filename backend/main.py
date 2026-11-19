@@ -1324,6 +1324,87 @@ def odds_status():
             'leagues':{r['league']:{'attempted_at':r['attempted_at'],'saved':r['saved'],'error':r['error']} for r in syncs}}
 
 
+@app.get('/api/evaluation/market')
+def evaluate_market(league: str = 'SHL', limit: int = Query(default=300, ge=1, le=2000)):
+    '''Out-of-sample historical comparison of genuinely archived pregame forecasts and odds.
+
+    No look-ahead: forecasts and odds must predate the scheduled puck drop.
+    Does not train or change the production model.
+    '''
+    import math
+    if league not in LEAGUES:
+        raise HTTPException(status_code=400, detail='Okänd liga')
+    with db() as c:
+        odds.setup(c)
+        rows=c.execute('''SELECT m.id,m.date,m.home_name,m.away_name,m.home_goals,m.away_goals,
+                   a.created_at,a.home_win,a.draw,a.away_win
+                   FROM matches m JOIN forecast_archive a ON a.match_id=m.id
+                   WHERE m.league=? AND m.status='FINISHED'
+                     AND m.home_goals IS NOT NULL AND m.away_goals IS NOT NULL
+                   ORDER BY m.date DESC LIMIT ?''',(league,limit)).fetchall()
+        snapshots=c.execute('''SELECT * FROM odds_snapshots WHERE league=?
+                    ORDER BY fetched_at DESC''',(league,)).fetchall()
+    def dt(value):
+        try:
+            d=datetime.fromisoformat(str(value).replace('Z','+00:00'))
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        except (TypeError,ValueError): return None
+    def score(probs,actual):
+        return (sum((probs[k]-(1 if k==actual else 0))**2 for k in ('1','X','2')),
+                -math.log(max(probs[actual],1e-12)),
+                int(max(('1','X','2'),key=lambda k:probs[k])==actual))
+    # Index by normalized home and away names to avoid a costly full scan per match.
+    by_teams={}
+    for snap in snapshots:
+        key=(odds.canonical(snap['home_name']),odds.canonical(snap['away_name']))
+        by_teams.setdefault(key,[]).append(snap)
+    weights=(0,0.25,0.5,0.75,1.0) # weight of market, not a fitted parameter
+    sums={str(w):{'brier':0.,'log_loss':0.,'correct':0} for w in weights}
+    games=[]; pregame_forecasts=0
+    for row in rows:
+        start=dt(row['date']); forecast_time=dt(row['created_at'])
+        if not start or not forecast_time or forecast_time>=start: continue
+        pregame_forecasts+=1
+        candidates=by_teams.get((odds.canonical(row['home_name']),odds.canonical(row['away_name'])),[])
+        chosen=None
+        for snap in candidates:
+            fetched=dt(snap['fetched_at']); event_start=dt(snap['commence_time'])
+            if fetched and event_start and fetched<start and abs((event_start-start).total_seconds())<=10800:
+                chosen=snap;break
+        if not chosen: continue
+        try:
+            market_raw=json.loads(chosen['market_probs'])
+            market={k:float(market_raw[k])/100 for k in ('1','X','2')}
+            model={k:float(row[col])/100 for k,col in (('1','home_win'),('X','draw'),('2','away_win'))}
+            if any(v<0 or v>1 for v in (*model.values(),*market.values())):continue
+            if not (0.98<=sum(model.values())<=1.02 and 0.98<=sum(market.values())<=1.02):continue
+            model={k:v/sum(model.values()) for k,v in model.items()}
+            market={k:v/sum(market.values()) for k,v in market.items()}
+        except (ValueError,TypeError,KeyError,ZeroDivisionError):continue
+        actual=('1' if row['home_goals']>row['away_goals'] else '2' if row['home_goals']<row['away_goals'] else 'X')
+        for w in weights:
+            blend={k:(1-w)*model[k]+w*market[k] for k in ('1','X','2')}
+            brier,loss,hit=score(blend,actual)
+            sums[str(w)]['brier']+=brier;sums[str(w)]['log_loss']+=loss;sums[str(w)]['correct']+=hit
+        games.append({'id':row['id'],'date':row['date'],'home':row['home_name'],'away':row['away_name'],
+                      'score':f"{row['home_goals']}-{row['away_goals']}",'actual':actual,
+                      'model':{k:round(v*100,2) for k,v in model.items()},
+                      'market':{k:round(v*100,2) for k,v in market.items()},
+                      'forecast_at':row['created_at'],'odds_at':chosen['fetched_at'],
+                      'model_pick':max(model,key=model.get),'market_pick':max(market,key=market.get)})
+    n=len(games)
+    comparison={str(w):{'market_weight_pct':round(w*100), 'matches':n,
+                        'accuracy_pct':round(100*sums[str(w)]['correct']/n,2) if n else None,
+                        'mean_brier':round(sums[str(w)]['brier']/n,5) if n else None,
+                        'mean_log_loss':round(sums[str(w)]['log_loss']/n,5) if n else None}
+                for w in weights}
+    return {'league':league,'finished_with_archived_forecast':len(rows),
+            'valid_pregame_forecasts':pregame_forecasts,'matched_with_pregame_1x2_odds':n,
+            'comparison':comparison,'recent':games[:50],
+            'method':'Endast sparade prognoser och 3-vägsodds före matchstart. Utfall efter 60 minuter. Lägre Brier/log loss är bättre. 0%=endast modell; 100%=endast marknad.',
+            'warning':'Ingen viktning har tränats eller aktiverats. Välj inte bästa vikten på samma matcher som används för slutlig utvärdering. Få matchade matcher ger osäkra resultat.'}
+
+
 @app.get('/api/odds/match/{match_id:path}')
 def match_odds(match_id: str):
     with db() as c:
