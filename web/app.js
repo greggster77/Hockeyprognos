@@ -562,6 +562,16 @@ function render() {
           (d.available_samples != null ? `<p>Matcher tillgängliga: ${esc(d.available_samples)} (minst ${esc(d.minimum_samples)})</p>` : "") +
           (d.training_matches != null ? `<p>Träningsmatcher: ${esc(d.training_matches)} · Testmatcher: ${esc(d.validation_matches)}</p>` : "") +
           (d.baseline && d.candidate ? `<div class="metric"><span>Träff: nuvarande / AI</span><strong>${fmt(d.baseline.accuracy_pct)}% / ${fmt(d.candidate.accuracy_pct)}%</strong></div><div class="metric"><span>Brier: nuvarande / AI</span><strong>${fmt(d.baseline.mean_brier)} / ${fmt(d.candidate.mean_brier)}</strong></div><div class="metric"><span>Log loss: nuvarande / AI</span><strong>${fmt(d.baseline.mean_log_loss)} / ${fmt(d.candidate.mean_log_loss)}</strong></div>` : "") +
+
+          (d.diagnostics ? (() => {
+            const q = d.diagnostics;
+            const percent = v => v == null ? '–' : Number(v).toFixed(1) + '%';
+            const rows = Object.entries(q.match_types || {}).map(([k,v]) => `<div class="metric"><span>${esc(({hemmafavorit:'Hemmafavorit',bortafavorit:'Bortafavorit',oavgjort_favorit:'Oavgjort som favorit',jämn_match:'Jämna matcher',tydlig_favorit:'Tydlig favorit'})[k] || k)} (${v.matches})</span><strong>${percent(v.baseline_accuracy_pct)} / ${percent(v.ai_accuracy_pct)}</strong></div>`).join('');
+            const outcomeRows = Object.entries(q.outcomes || {}).map(([k,v]) => `<div class="metric"><span>${esc(k)}: ${v.actual} verkliga · ${v.predicted} AI-tips</span><strong>Precision ${percent(v.precision_pct)} · Recall ${percent(v.recall_pct)}</strong></div>`).join('');
+            const confidenceRows = Object.entries(q.confidence_bins || {}).filter(([_,v]) => v.matches).map(([k,v]) => `<div class="metric"><span>${esc(k.replaceAll('_','–'))}: ${v.matches} matcher · snittprognos ${percent(v.average_confidence_pct)}</span><strong>${percent(v.accuracy_pct)} rätt</strong></div>`).join('');
+            const mistakes = (q.recent_ai_misses || []).map(v => `<div class="metric"><span>${esc(v.date)} · AI ${esc(v.ai_pick)} (${percent(v.ai_confidence_pct)})</span><strong>Utfall ${esc(v.actual)}</strong></div>`).join('');
+            return `<details style="margin-top:16px" open><summary><strong>🔍 Varför missar AI:n? · Testanalys</strong></summary><p class="muted">${esc(q.note || '')}</p><div class="metric"><span>AI rättade fel från grundmodellen</span><strong>${q.ai_corrected_baseline_errors}</strong></div><div class="metric"><span>AI skapade nya fel</span><strong>${q.ai_introduced_errors}</strong></div><h4>Träff per matchtyp</h4><p class="muted">Nuvarande / AI. Jämn match = mindre än 10 procentenheter mellan två högsta utfall.</p>${rows}<h4>1X2 · precision och recall</h4>${outcomeRows}<h4>Kalibrering per säkerhetsnivå</h4>${confidenceRows}<h4>Senaste AI-missarna</h4>${mistakes || '<p>Inga registrerade missar.</p>'}</details>`;
+          })() : '') +
           `<p class="muted">Liveprognoser: oförändrade. ${esc(d.warning || "")}</p>`;
       } catch (e) { if (aiStatus.isConnected) aiStatus.textContent = "Kunde inte läsa AI-status: " + e.message; }
     };
