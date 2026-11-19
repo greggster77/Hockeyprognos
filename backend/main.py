@@ -96,6 +96,16 @@ def init():
             FOREIGN KEY(match_id) REFERENCES matches(id)
         );
 
+        CREATE TABLE IF NOT EXISTS prediction_snapshots (
+            match_id TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            home_win REAL NOT NULL,
+            draw REAL NOT NULL,
+            away_win REAL NOT NULL,
+            PRIMARY KEY (match_id, recorded_at)
+        );
+        CREATE INDEX IF NOT EXISTS idx_prediction_snapshots_match ON prediction_snapshots(match_id, recorded_at);
+
         CREATE TABLE IF NOT EXISTS prediction_results (
             match_id TEXT PRIMARY KEY,
             actual TEXT NOT NULL,
@@ -516,6 +526,12 @@ def recompute():
                     json.dumps(prediction["details"]),
                 ),
             )
+
+            # Record genuine pregame revisions; never overwrite the original archive.
+            c.execute("""INSERT INTO prediction_snapshots
+                (match_id,recorded_at,home_win,draw,away_win)
+                VALUES (?,?,?,?,?) ON CONFLICT(match_id,recorded_at) DO NOTHING""",
+                (match["id"], now(), prediction["home_win"], prediction["draw"], prediction["away_win"]))
 
         log.info("HA forecasts recomputed: %d", ha_forecasts_created)
         finished = c.execute(
@@ -996,6 +1012,9 @@ def serialize(c, match, prediction=None, preloaded=False):
                 "1": prediction_data["home_win"], "X": prediction_data["draw"],
                 "2": prediction_data["away_win"]}[k])
     return {
+        "trend": None,
+        "rest": None,
+        "starting_goalies": {"home": None, "away": None, "verified": False},
         "actual_outcome": actual_outcome,
         "predicted_outcome": predicted_outcome,
         "id": match["id"],
@@ -1010,6 +1029,58 @@ def serialize(c, match, prediction=None, preloaded=False):
         },
         "prediction": prediction_data,
     }
+
+
+def enrich_fixture_batch(c, fixtures, result):
+    """One bounded history read for rest; historical snapshots for actual forecast trend.
+
+    Does not use results after the fixture's puck drop or invent goalies.
+    """
+    if not fixtures:
+        return
+    ids = [r["id"] for r in fixtures]
+    ph = ",".join("?" for _ in ids)
+    snapshot_rows = c.execute(
+        f"SELECT match_id, recorded_at, home_win, draw, away_win FROM prediction_snapshots "
+        f"WHERE match_id IN ({ph}) ORDER BY recorded_at DESC", ids).fetchall()
+    snapshots = {}
+    for r in snapshot_rows:
+        snapshots.setdefault(r["match_id"], []).append(r)
+    leagues = sorted(set(r["league"] for r in fixtures))
+    first = min(r["date"] for r in fixtures)
+    last = max(r["date"] for r in fixtures)
+    # Only recent fixtures needed to calculate rest and 7-day workload.
+    lower = (datetime.fromisoformat(first.replace("Z", "+00:00")) - timedelta(days=15)).isoformat()
+    lph = ",".join("?" for _ in leagues)
+    history = c.execute(
+        f"SELECT league,date,home_id,away_id FROM matches WHERE status='FINISHED' "
+        f"AND date>=? AND date<? AND league IN ({lph}) ORDER BY date DESC",
+        [lower,last,*leagues]).fetchall()
+    by_team = {}
+    for r in history:
+        for team in (r["home_id"], r["away_id"]):
+            by_team.setdefault((r["league"],team), []).append(r["date"])
+    for fixture, output in zip(fixtures,result):
+        prediction = output.get("prediction")
+        if prediction and fixture["status"] == "SCHEDULED":
+            entries = snapshots.get(fixture["id"], [])
+            current = next((r for r in entries if r["recorded_at"] <= fixture["date"]),None)
+            previous = next((r for r in entries if current and r["recorded_at"] < current["recorded_at"]),None)
+            if current and previous:
+                output["trend"] = {k: round(float(current[k])-float(previous[k]),4)
+                                   for k in ("home_win","draw","away_win")}
+                output["trend"]["since"] = previous["recorded_at"]
+                output["trend"]["at"] = current["recorded_at"]
+        rest = {}
+        kickoff = datetime.fromisoformat(fixture["date"].replace("Z","+00:00"))
+        for side in ("home","away"):
+            dates = [datetime.fromisoformat(d.replace("Z","+00:00"))
+                     for d in by_team.get((fixture["league"],fixture[side+"_id"]),[])
+                     if d < fixture["date"]]
+            last_game = max(dates) if dates else None
+            rest[side] = {"days_since_last":round((kickoff-last_game).total_seconds()/86400,1) if last_game else None,
+                          "games_last_7_days":sum(0 < (kickoff-d).total_seconds() <= 7*86400 for d in dates)}
+        output["rest"] = rest
 
 
 @app.get("/api/matches")
@@ -1068,6 +1139,7 @@ def matches(
             serialize(c, match, predictions_by_id.get(match["id"]), preloaded=True)
             for match in rows
         ]
+        enrich_fixture_batch(c, rows, result)
     with _match_response_lock:
         _match_response_cache[cache_key] = (time.monotonic() + MATCH_RESPONSE_TTL, result)
         if len(_match_response_cache) > 100:

@@ -327,14 +327,33 @@ function suggestedOutcome(m) {
   const second = entries[1][1];
   return {pick,prob,margin:prob-second};
 }
+function trendBadge(m, field) {
+  const v = m.trend?.[field];
+  if (v === undefined || v === null || !Number.isFinite(Number(v))) return `<small class="muted" title="Kräver två sparade förhandsprognoser">Trend: –</small>`;
+  const pp = Number(v) * 100;
+  const symbol = pp > 0.5 ? "↗" : pp < -0.5 ? "↘" : "→";
+  const color = pp > 0.5 ? "#22c55e" : pp < -0.5 ? "#ef4444" : "#94a3b8";
+  return `<small style="color:${color}" title="Förändring sedan föregående sparade prognos">${symbol} ${pp > 0 ? "+" : ""}${pp.toFixed(1).replace('.',',')} pp</small>`;
+}
+function restInfo(m) {
+  if (!m.rest) return "";
+  const part = (side, name) => {
+    const r = m.rest[side];
+    if (!r || r.days_since_last === null) return `${esc(name)}: vilodata saknas`;
+    return `${esc(name)}: ${r.days_since_last.toFixed(1).replace('.',',')} dagar sedan senaste match · ${r.games_last_7_days} matcher/7 dagar`;
+  };
+  return `<p class="muted" style="margin-top:8px;font-size:.83rem">🕒 ${part("home",m.home)}<br>🕒 ${part("away",m.away)}</p>`;
+}
 function suggestionPanel(m) {
   const s = suggestedOutcome(m);
   if (!s) return `<div class="pick-panel"><strong>🎯 Modellens 1X2-förslag</strong><p class="muted">Väntar på tillräcklig statistik för ett förslag.</p></div>`;
   const names = {"1":"Hemmaseger","X":"Oavgjort","2":"Bortaseger"};
+  // Initial display threshold, NOT trained or calibrated. A pick remains visible for analysis.
+  const marginPP = s.margin * 100;
+  const verdict = marginPP < 5 ? "Avstå – jämn match" : marginPP < 12 ? "Jämn match – försiktighet" : "Tydligare modellförslag";
   const verified = m.status === "FINISHED" && m.actual_outcome;
   const result = verified ? `<p class="muted">Utfall efter 60 min: <strong>${esc(m.actual_outcome)}</strong> · <strong>${s.pick === m.actual_outcome ? "✓ Rätt" : "✕ Fel"}</strong></p>` : "";
-  const warning = m.status === "FINISHED" && !m.prediction?.created_at ? "Ingen verifierad förhandsprognos." : "Förslag utifrån befintlig modell, inte en aktiverad AI-kandidat.";
-  return `<div class="pick-panel"><div class="pick-head"><strong>🎯 Modellens 1X2-förslag</strong><span class="pick-choice">${esc(s.pick)} · ${names[s.pick]}</span></div><p class="muted">Beräknad sannolikhet: <strong>${(s.prob*100).toFixed(1).replace('.',',')} %</strong> · Skillnad mot näst högsta utfall: ${(s.margin*100).toFixed(1).replace('.',',')} procentenheter</p>${result}<p class="muted pick-note">${warning} Prognoser är osäkra och inte spelgarantier.</p></div>`;
+  return `<div class="pick-panel"><div class="pick-head"><strong>🎯 Modellens 1X2-förslag</strong><span class="pick-choice">${esc(s.pick)} · ${names[s.pick]}</span></div><p><strong>${verdict}</strong></p><p class="muted">Sannolikhet: ${(s.prob*100).toFixed(1).replace('.',',')} % · Skillnad till tvåan: ${marginPP.toFixed(1).replace('.',',')} procentenheter</p>${restInfo(m)}<p class="muted">🥅 Startmålvakter: ej bekräftade i tillgänglig datakälla. Målvaktsstatistik finns under SHL Statistik.</p>${result}<p class="muted pick-note">Gränserna 5/12 pp är preliminära och ska backtestas. Förslaget kommer från nuvarande modell, inte AI-kandidaten.</p></div>`;
 }
 
 function card(m) {
@@ -347,7 +366,7 @@ function card(m) {
     live ? "PÅGÅR · resultat inväntas" : pending ? "STARTAD · resultat inväntas" : "Kommande";
   const outcome = finished && m.actual_outcome && m.predicted_outcome ?
     `<p class="muted" style="margin-top:10px">Prognos före match: ${esc(m.predicted_outcome)} · Utfall efter 60 min: ${esc(m.actual_outcome)} · <strong>${m.predicted_outcome === m.actual_outcome ? "✓ Rätt" : "✕ Fel"}</strong></p>` : "";
-  const probabilities = p ? `<div class="percent"><div><small>1 · Hemma</small><b>${pct(p.home_win)}</b></div><div><small>X · Oavgjort</small><b>${pct(p.draw)}</b></div><div><small>2 · Borta</small><b>${pct(p.away_win)}</b></div></div>` :
+  const probabilities = p ? `<div class="percent"><div><small>1 · Hemma</small><b>${pct(p.home_win)}</b>${trendBadge(m,"home_win")}</div><div><small>X · Oavgjort</small><b>${pct(p.draw)}</b>${trendBadge(m,"draw")}</div><div><small>2 · Borta</small><b>${pct(p.away_win)}</b>${trendBadge(m,"away_win")}</div></div>` :
     `<p class="muted">${finished ? "Ingen arkiverad prognos före matchstart." : pending || live ? "Resultatet kontrolleras mot NHL:s officiella uppgifter." : "Ingen prognos tillgänglig: otillräcklig verifierad matchhistorik."}</p>`;
   return `<article class="panel match" data-id="${esc(m.id)}"><div class="topline"><span>${esc(m.league)} · ${esc(formatDate(m.date))}</span><span>${status}</span></div><div class="teams"><div class="team-side">${teamMark(m.home, m.league)}<span>${esc(displayTeamName(m.home, m.league))}</span></div><span class="vs">${finished ? `${esc(m.score.home)}–${esc(m.score.away)}` : "VS"}</span><div class="team-side">${teamMark(m.away, m.league)}<span>${esc(displayTeamName(m.away, m.league))}</span></div></div>${finished ? '<p class="muted" style="margin-bottom:8px">Arkiverad prognos före matchstart</p>' : ''}${probabilities}${suggestionPanel(m)}${outcome}</article>`;
 }
