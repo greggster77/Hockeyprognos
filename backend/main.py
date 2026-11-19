@@ -415,6 +415,7 @@ def fetch_swedish(league):
 
 class HistoricalMatch:
     def __init__(self, row):
+        self.date = row["date"]
         self.home_id = row["home_id"]
         self.away_id = row["away_id"]
         self.home_goals = row["home_goals"]
