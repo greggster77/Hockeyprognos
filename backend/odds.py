@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import httpx
 
 LOG = logging.getLogger(__name__)
@@ -67,10 +67,20 @@ def parse_event(event):
 def month_now(): return datetime.now(timezone.utc).strftime('%Y-%m')
 
 
-def fetch_league(c, league):
+def fetch_league(c, league, min_interval_hours=0):
     key=os.getenv('ODDS_API_KEY','').strip()
     if not key: return {'status':'not_configured','saved':0}
     month=month_now()
+    # Prevent unnecessary paid API requests after a Render wake/redeploy.
+    if min_interval_hours:
+        previous=c.execute('SELECT attempted_at FROM odds_sync WHERE league=?',(league,)).fetchone()
+        if previous and previous['attempted_at']:
+            try:
+                last=datetime.fromisoformat(previous['attempted_at'].replace('Z','+00:00'))
+                if last.tzinfo is None: last=last.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc)-last < timedelta(hours=min_interval_hours):
+                    return {'status':'recent_attempt','saved':0}
+            except ValueError: pass
     quota=c.execute('SELECT used,remaining FROM odds_quota WHERE month=?',(month,)).fetchone()
     used=int(quota['used']) if quota else 0
     remaining=quota['remaining'] if quota else None
@@ -90,13 +100,25 @@ def fetch_league(c, league):
         else: new_used=used+1
         new_remaining=int(header_remaining) if header_remaining is not None else remaining
         c.execute('INSERT INTO odds_quota(month,used,remaining) VALUES(?,?,?) ON CONFLICT(month) DO UPDATE SET used=excluded.used,remaining=excluded.remaining',(month,max(used,new_used),new_remaining))
+        if response.status_code >= 400:
+            # The provider's error code/message is useful; never log the key or URL.
+            try:
+                detail=response.json()
+                if isinstance(detail,dict):
+                    detail=f"{detail.get('error_code','')} {detail.get('message','')}".strip()
+                else: detail='API error'
+            except ValueError: detail='API error'
+            raise ValueError(f'HTTP {response.status_code}: {str(detail)[:170]}')
         response.raise_for_status()
         events=response.json()
         if not isinstance(events,list): raise ValueError('Unexpected API payload')
         saved=0
+        skipped=0
         for event in events:
             result=parse_event(event)
-            if not result: continue
+            if not result:
+                skipped+=1
+                continue
             try:
                 start=datetime.fromisoformat(event['commence_time'].replace('Z','+00:00'))
             except (ValueError,KeyError,AttributeError): continue
@@ -106,11 +128,11 @@ def fetch_league(c, league):
                 timestamp,result['bookmakers'],json.dumps(result['market_probs']),json.dumps(result['mean_odds'])))
             saved+=1
         c.execute('''INSERT INTO odds_sync VALUES(?,?,?,?) ON CONFLICT(league) DO UPDATE SET attempted_at=excluded.attempted_at,error=excluded.error,saved=excluded.saved''',(league,timestamp,None,saved))
-        return {'status':'ok','saved':saved,'used':new_used,'remaining':new_remaining}
+        return {'status':'ok','events':len(events),'saved':saved,'skipped_non_3way':skipped,'used':new_used,'remaining':new_remaining}
     except (httpx.HTTPError,ValueError,KeyError,TypeError) as exc:
         LOG.warning('Odds fetch %s: %s',league,exc)
         c.execute('''INSERT INTO odds_sync VALUES(?,?,?,?) ON CONFLICT(league) DO UPDATE SET attempted_at=excluded.attempted_at,error=excluded.error,saved=excluded.saved''',(league,timestamp,str(exc)[:250],0))
-        return {'status':'error','saved':0}
+        return {'status':'error','saved':0,'reason':str(exc)[:170]}
 
 
 def for_match(c, league, home, away, match_date):

@@ -678,6 +678,9 @@ async def lifespan(app):
     scheduler.add_job(refresh_odds, "cron", hour="7,17", minute=10,
                       id="free-market-odds", max_instances=1, coalesce=True, replace_existing=True)
     scheduler.start()
+    # Render Free may sleep through cron times. On wake, perform a guarded
+    # catch-up only if a league has not been attempted in the last 8 hours.
+    threading.Thread(target=refresh_odds, name="initial-odds-catchup", daemon=True).start()
     threading.Thread(target=refresh_shl_stats, name="initial-shl-stats", daemon=True).start()
     # Short initial refresh, not the full NHL season.
     threading.Thread(target=sync, kwargs={"mode": "weekly"},
@@ -1299,7 +1302,8 @@ def refresh_odds():
     for league in LEAGUES:
         try:
             with db() as c:
-                odds.fetch_league(c, league)
+                result = odds.fetch_league(c, league, min_interval_hours=8)
+                log.info('Odds %s: %s', league, result)
         except Exception:
             log.exception('Odds refresh failed for %s', league)
 
@@ -1310,10 +1314,13 @@ def odds_status():
         odds.setup(c)
         quota=c.execute('SELECT * FROM odds_quota WHERE month=?',(odds.month_now(),)).fetchone()
         syncs=c.execute('SELECT * FROM odds_sync').fetchall()
+        snapshots=c.execute('SELECT league, COUNT(*) AS count FROM odds_snapshots GROUP BY league').fetchall()
     return {'configured':bool(os.getenv('ODDS_API_KEY')),
             'used':quota['used'] if quota else 0,
             'remaining':quota['remaining'] if quota else None,
             'monthly_local_cap':400,
+            'snapshot_counts':{r['league']:r['count'] for r in snapshots},
+            'schedule':'07:10 and 17:10 Europe/Stockholm, plus guarded startup catch-up',
             'leagues':{r['league']:{'attempted_at':r['attempted_at'],'saved':r['saved'],'error':r['error']} for r in syncs}}
 
 
