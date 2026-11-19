@@ -313,6 +313,30 @@ function teamMark(name, league) {
 function notice() {
   return '<section class="panel notice">ℹ️ Prognoser är statistiska uppskattningar, inte garantier. 1X2 avser resultatet efter 60 minuter – utan förlängning och straffar.</section>';
 }
+
+// 1X2-förslag från den aktuella liveprognosen; ingen separat tränad AI aktiveras här.
+function suggestedOutcome(m) {
+  const p = m.prediction;
+  if (!p || [p.home_win,p.draw,p.away_win].some(v => !Number.isFinite(Number(v)))) return null;
+  const entries = [["1",Number(p.home_win)],["X",Number(p.draw)],["2",Number(p.away_win)]];
+  const total = entries.reduce((s,e)=>s+e[1],0);
+  if (total <= 0) return null;
+  entries.forEach(e => e[1] /= total);
+  entries.sort((a,b)=>b[1]-a[1]);
+  const [pick,prob] = entries[0];
+  const second = entries[1][1];
+  return {pick,prob,margin:prob-second};
+}
+function suggestionPanel(m) {
+  const s = suggestedOutcome(m);
+  if (!s) return `<div class="pick-panel"><strong>🎯 Modellens 1X2-förslag</strong><p class="muted">Väntar på tillräcklig statistik för ett förslag.</p></div>`;
+  const names = {"1":"Hemmaseger","X":"Oavgjort","2":"Bortaseger"};
+  const verified = m.status === "FINISHED" && m.actual_outcome;
+  const result = verified ? `<p class="muted">Utfall efter 60 min: <strong>${esc(m.actual_outcome)}</strong> · <strong>${s.pick === m.actual_outcome ? "✓ Rätt" : "✕ Fel"}</strong></p>` : "";
+  const warning = m.status === "FINISHED" && !m.prediction?.created_at ? "Ingen verifierad förhandsprognos." : "Förslag utifrån befintlig modell, inte en aktiverad AI-kandidat.";
+  return `<div class="pick-panel"><div class="pick-head"><strong>🎯 Modellens 1X2-förslag</strong><span class="pick-choice">${esc(s.pick)} · ${names[s.pick]}</span></div><p class="muted">Beräknad sannolikhet: <strong>${(s.prob*100).toFixed(1).replace('.',',')} %</strong> · Skillnad mot näst högsta utfall: ${(s.margin*100).toFixed(1).replace('.',',')} procentenheter</p>${result}<p class="muted pick-note">${warning} Prognoser är osäkra och inte spelgarantier.</p></div>`;
+}
+
 function card(m) {
   const p = m.prediction;
   const finished = m.status === "FINISHED";
@@ -325,7 +349,7 @@ function card(m) {
     `<p class="muted" style="margin-top:10px">Prognos före match: ${esc(m.predicted_outcome)} · Utfall efter 60 min: ${esc(m.actual_outcome)} · <strong>${m.predicted_outcome === m.actual_outcome ? "✓ Rätt" : "✕ Fel"}</strong></p>` : "";
   const probabilities = p ? `<div class="percent"><div><small>1 · Hemma</small><b>${pct(p.home_win)}</b></div><div><small>X · Oavgjort</small><b>${pct(p.draw)}</b></div><div><small>2 · Borta</small><b>${pct(p.away_win)}</b></div></div>` :
     `<p class="muted">${finished ? "Ingen arkiverad prognos före matchstart." : pending || live ? "Resultatet kontrolleras mot NHL:s officiella uppgifter." : "Ingen prognos tillgänglig: otillräcklig verifierad matchhistorik."}</p>`;
-  return `<article class="panel match" data-id="${esc(m.id)}"><div class="topline"><span>${esc(m.league)} · ${esc(formatDate(m.date))}</span><span>${status}</span></div><div class="teams"><div class="team-side">${teamMark(m.home, m.league)}<span>${esc(displayTeamName(m.home, m.league))}</span></div><span class="vs">${finished ? `${esc(m.score.home)}–${esc(m.score.away)}` : "VS"}</span><div class="team-side">${teamMark(m.away, m.league)}<span>${esc(displayTeamName(m.away, m.league))}</span></div></div>${finished ? '<p class="muted" style="margin-bottom:8px">Arkiverad prognos före matchstart</p>' : ''}${probabilities}${outcome}</article>`;
+  return `<article class="panel match" data-id="${esc(m.id)}"><div class="topline"><span>${esc(m.league)} · ${esc(formatDate(m.date))}</span><span>${status}</span></div><div class="teams"><div class="team-side">${teamMark(m.home, m.league)}<span>${esc(displayTeamName(m.home, m.league))}</span></div><span class="vs">${finished ? `${esc(m.score.home)}–${esc(m.score.away)}` : "VS"}</span><div class="team-side">${teamMark(m.away, m.league)}<span>${esc(displayTeamName(m.away, m.league))}</span></div></div>${finished ? '<p class="muted" style="margin-bottom:8px">Arkiverad prognos före matchstart</p>' : ''}${probabilities}${suggestionPanel(m)}${outcome}</article>`;
 }
 
 // Resultat efter 60 minuter: V / O / F utifrån valt lags perspektiv.
