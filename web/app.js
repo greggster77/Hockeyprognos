@@ -709,8 +709,8 @@ async function loadHistory() {
 }
 // Fast league switching: stale-while-revalidate with a small, bounded session cache.
 // Never persist sensitive data; these endpoints contain only public match information.
-const MATCH_CACHE_TTL = 20 * 1000;
-const MATCH_CACHE_STALE = 5 * 60 * 1000;
+const MATCH_CACHE_TTL = 5 * 60 * 1000;
+const MATCH_CACHE_STALE = 48 * 60 * 60 * 1000;
 const MATCH_CACHE_MAX = 12;
 const matchCache = new Map();
 const pendingMatches = new Map();
@@ -725,7 +725,7 @@ function readMatchCache(key) {
   let entry = matchCache.get(key);
   if (!entry) {
     try {
-      const stored = sessionStorage.getItem("hp34:" + key);
+      const stored = localStorage.getItem("hp3913:" + key);
       if (stored) entry = JSON.parse(stored);
     } catch (_) { /* private mode or storage disabled */ }
   }
@@ -741,9 +741,9 @@ function saveMatchCache(key, data) {
   while (matchCache.size > MATCH_CACHE_MAX) {
     const oldest = matchCache.keys().next().value;
     matchCache.delete(oldest);
-    try { sessionStorage.removeItem("hp34:" + oldest); } catch (_) {}
+    try { localStorage.removeItem("hp3913:" + oldest); } catch (_) {}
   }
-  try { sessionStorage.setItem("hp34:" + key, JSON.stringify(entry)); } catch (_) {}
+  try { localStorage.setItem("hp3913:" + key, JSON.stringify(entry)); } catch (_) {}
 }
 function getLeaguesOnce() {
   if (leagueData) return Promise.resolve(leagueData);
@@ -787,7 +787,10 @@ async function load(force = false) {
     state.leagues = data;
     if (generation === loadGeneration) render();
   }).catch(() => { /* match list can still be shown without league metadata */ });
-  if (cached && Date.now() - cached.time < MATCH_CACHE_TTL) return;
+  // Never treat live or imminent fixtures as five-minute-fresh.
+  const hasLive = cached && cached.data.some(m => m.status === "LIVE" ||
+    (m.status === "SCHEDULED" && new Date(m.date).getTime() <= Date.now()));
+  if (cached && !hasLive && Date.now() - cached.time < MATCH_CACHE_TTL) return;
   try {
     const matches = await fetchMatches(key, day, days, league);
     if (generation !== loadGeneration || state.view !== "matches") return;
