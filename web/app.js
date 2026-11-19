@@ -258,7 +258,13 @@ async function resolveSwedishLogo(league, name) {
   if (url.startsWith("//")) url = "https:" + url;
   else if (url.startsWith("/")) url = (league === "HA" ? "https://hockeyallsvenskan.se" : "https://www.shl.se") + url;
   if (!/^https:\/\//i.test(url)) url = "";
-  if (league === "HA" && site?.code && url) url = "/api/ha/logo/" + encodeURIComponent(site.code);
+  if (league === "HA" && site?.code && url) {
+    // The official image is the backup if the server-side proxy is blocked.
+    const official = url;
+    url = "/api/ha/logo/" + encodeURIComponent(site.code);
+    // Only same-origin fallback metadata; do not trust arbitrary HTML attributes.
+    logoMemo.set(key + ":official", official);
+  }
   if (url) logoMemo.set(key, url);
   return url || null;
 }
@@ -279,6 +285,12 @@ function hydrateSwedishLogos() {
     img.decoding = "async";
 
     img.onerror = () => {
+      const official = logoMemo.get(logoKey(league, displayTeamName(name, league)) + ":official");
+      if (league === "HA" && official && img.src !== official && !img.dataset.triedOfficial) {
+        img.dataset.triedOfficial = "1";
+        img.src = official;
+        return;
+      }
       if (img.isConnected) img.replaceWith(el);
     };
 

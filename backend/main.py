@@ -464,7 +464,13 @@ def recompute():
 
             except ValueError as exc:
                 if match["league"] == "HA":
-                    log.info("HA forecast skipped %s: %s (verified history=%d)", match["id"], exc, len(history))
+                    log.warning("HA forecast skipped %s: %s (history=%d, home=%s, away=%s, home_games=%d, away_games=%d)",
+                                match["id"], exc, len(history), match["home_id"], match["away_id"],
+                                sum(r["home_id"] == match["home_id"] or r["away_id"] == match["home_id"] for r in history),
+                                sum(r["home_id"] == match["away_id"] or r["away_id"] == match["away_id"] for r in history))
+                continue
+            except Exception:
+                log.exception("Forecast failed unexpectedly for %s (%s)", match["id"], match["league"])
                 continue
 
             # Archive the latest genuine pregame forecast for later evaluation.
@@ -607,9 +613,10 @@ def sync(mode="weekly"):
             except Exception as exc:
                 log.exception("Sync failed %s", league)
                 error(league, exc)
-        if changed:
-            recompute()
-            invalidate_match_response_cache()
+        # Always retry missing forecasts: older deployments could import matches
+        # successfully but fail to calculate predictions afterwards.
+        recompute()
+        invalidate_match_response_cache()
     finally:
         sync_lock.release()
 
@@ -817,10 +824,18 @@ def ha_diagnostics():
         predictions = c.execute("SELECT COUNT(*) AS n FROM predictions p JOIN matches m ON m.id=p.match_id WHERE m.league='HA'").fetchone()['n']
         teams = c.execute("SELECT COUNT(DISTINCT home_id) AS n FROM matches WHERE league='HA' AND status='FINISHED'").fetchone()['n']
     directory = ha_logos().get('teams', [])
+    with db() as c:
+        upcoming = c.execute("SELECT id, date, home_id, away_id FROM matches WHERE league='HA' AND status='SCHEDULED' ORDER BY date LIMIT 8").fetchall()
+        samples = []
+        for m in upcoming:
+            hist = c.execute("SELECT home_id,away_id FROM matches WHERE league='HA' AND status='FINISHED' AND date<? AND home_goals IS NOT NULL AND away_goals IS NOT NULL", (m['date'],)).fetchall()
+            samples.append({'match_id': m['id'], 'history': len(hist),
+                            'home_games': sum(x['home_id']==m['home_id'] or x['away_id']==m['home_id'] for x in hist),
+                            'away_games': sum(x['home_id']==m['away_id'] or x['away_id']==m['away_id'] for x in hist)})
     return {'league': 'HA', 'matches_by_status': {r['status']: r['n'] for r in counts},
             'verified_finished': finished, 'teams_with_home_results': teams,
             'predictions': predictions, 'logo_directory_teams': len(directory),
-            'logos_with_urls': sum(bool(x.get('icon')) for x in directory)}
+            'logos_with_urls': sum(bool(x.get('icon')) for x in directory), 'upcoming_samples': samples}
 
 
 @app.get("/api/shl/logos")
