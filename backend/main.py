@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from model import predict
+from learning import train as train_learning
 import odds
 from storage import connect as storage_connect, USING_NEON
 
@@ -673,6 +674,8 @@ async def lifespan(app):
     )
     scheduler.add_job(refresh_shl_stats, "interval", minutes=30,
                       id="shl-stats", max_instances=1, replace_existing=True)
+    scheduler.add_job(refresh_ai_learning, "cron", day_of_week="mon", hour=4, minute=15,
+                      id="weekly-ai-learning", max_instances=1, coalesce=True, replace_existing=True)
     scheduler.add_job(refresh_model_evaluation, "interval", hours=24,
                       id="model-evaluation", max_instances=1, replace_existing=True)
     scheduler.add_job(refresh_odds, "cron", hour="7,17", minute=10,
@@ -1494,3 +1497,60 @@ def latest_model_evaluation():
     return {"updated_at": row['updated_at'] if row else None,
             "report": json.loads(row['payload']) if row else None,
             "note": "Testmodell; liveprognoserna är oförändrade."}
+
+
+# 3.11: self-training experimental calibration. Never overrides live predictions.
+def refresh_ai_learning():
+    for league in LEAGUES:
+        try:
+            with db() as c:
+                rows = c.execute("""SELECT * FROM matches WHERE league=? AND status='FINISHED'
+                                  AND home_goals IS NOT NULL AND away_goals IS NOT NULL
+                                  ORDER BY date, id""", (league,)).fetchall()
+            # Restrict compute cost on Render Free; preserve a chronological
+            # training window, including older results as input history.
+            samples = []
+            start = max(20, len(rows) - 260)
+            for i in range(start, len(rows)):
+                row = rows[i]
+                prior = [r for r in rows[:i] if r['date'] < row['date']]
+                if len(prior) < 20:
+                    continue
+                history = [HistoricalMatch(r) for r in prior]
+                try:
+                    p0 = predict(history, row['home_id'], row['away_id'], league=league, variant='current')
+                    p1 = predict(history, row['home_id'], row['away_id'], league=league, variant='h2h')
+                except (ValueError, KeyError, TypeError):
+                    continue
+                def vector(p):
+                    v = [float(p[k]) / 100 for k in ('home_win', 'draw', 'away_win')]
+                    return [x / sum(v) for x in v]
+                outcome = 0 if row['home_goals'] > row['away_goals'] else (2 if row['home_goals'] < row['away_goals'] else 1)
+                samples.append({'date': row['date'], 'current': vector(p0),
+                                'h2h': vector(p1), 'actual': outcome})
+            report = train_learning(samples, league)
+            with db() as c:
+                c.execute("""CREATE TABLE IF NOT EXISTS ai_training_reports
+                             (league TEXT PRIMARY KEY, trained_at TEXT NOT NULL, payload TEXT NOT NULL)""")
+                c.execute("""INSERT INTO ai_training_reports (league, trained_at, payload)
+                             VALUES (?, ?, ?) ON CONFLICT (league) DO UPDATE SET
+                             trained_at=excluded.trained_at, payload=excluded.payload""",
+                          (league, datetime.now(timezone.utc).isoformat(), json.dumps(report)))
+            log.info('AI learning %s: %s', league, report.get('status'))
+        except Exception:
+            log.exception('AI learning failed for %s', league)
+
+
+@app.get('/api/ai/training')
+def ai_training_status(league: str = 'SHL'):
+    if league not in LEAGUES:
+        raise HTTPException(status_code=400, detail='Okänd liga')
+    with db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS ai_training_reports
+                     (league TEXT PRIMARY KEY, trained_at TEXT NOT NULL, payload TEXT NOT NULL)""")
+        row = c.execute('SELECT * FROM ai_training_reports WHERE league=?', (league,)).fetchone()
+    if row is None:
+        return {'league': league, 'status': 'awaiting_first_weekly_training',
+                'schedule': 'Monday 04:15 Europe/Stockholm (when server is running)',
+                'live_model_changed': False}
+    return json.loads(row['payload'])
