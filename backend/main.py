@@ -1467,14 +1467,6 @@ def storage_status():
         raise HTTPException(status_code=503, detail="Database connection failed; see Render logs")
 
 
-app.mount(
-    "/",
-    StaticFiles(
-        directory=str(ROOT / "web"),
-        html=True,
-    ),
-    name="web",
-)
 # Cached daily walk-forward evaluation, kept separate from live predictions.
 def refresh_model_evaluation():
     try:
@@ -1554,3 +1546,14 @@ def ai_training_status(league: str = 'SHL'):
                 'schedule': 'Monday 04:15 Europe/Stockholm (when server is running)',
                 'live_model_changed': False}
     return json.loads(row['payload'])
+
+
+# Catch-all static mount must be registered AFTER all API routes.
+app.mount(
+    "/",
+    StaticFiles(
+        directory=str(ROOT / "web"),
+        html=True,
+    ),
+    name="web",
+)
