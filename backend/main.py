@@ -1112,6 +1112,36 @@ def history(
         }
 
 
+@app.get("/api/match-form/{match_id:path}")
+def match_form(match_id: str, limit: int = Query(20, ge=1, le=100)):
+    """Verified regulation-time history for both teams, before the selected fixture.
+
+    Uses canonical team IDs from the fixture, not display names, so HA aliases
+    and renamed teams cannot break the lookup. Never exposes future results.
+    """
+    with db() as c:
+        fixture = c.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+        if fixture is None:
+            raise HTTPException(status_code=404, detail="Matchen finns inte")
+        output = {"league": fixture["league"], "match_id": match_id, "limit": limit}
+        for side in ("home", "away"):
+            team_id = fixture[side + "_id"]
+            rows = c.execute("""SELECT * FROM matches
+                WHERE league=? AND status='FINISHED'
+                  AND home_goals IS NOT NULL AND away_goals IS NOT NULL
+                  AND date < ? AND id <> ?
+                  AND (home_id=? OR away_id=?)
+                ORDER BY date DESC, id DESC LIMIT ?""",
+                (fixture["league"], fixture["date"], match_id, team_id, team_id, limit)).fetchall()
+            games = []
+            for r in rows:
+                game = serialize(c, r)
+                game["perspective_home"] = r["home_id"] == team_id
+                games.append(game)
+            output[side] = {"team_id": team_id, "team": fixture[side + "_name"], "matches": games}
+        return output
+
+
 @app.get("/api/matches/{match_id:path}")
 def detail(match_id: str):
     with db() as c:

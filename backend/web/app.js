@@ -25,6 +25,7 @@ const state = {
   formData: {},
   formExpanded: {},
   formLoading: false,
+  formError: "",
   goalies: null,
   goalieError: "",
   goalieLoading: false,
@@ -199,8 +200,16 @@ const SHL_CANONICAL = {
   "Björklöven Herr": "Björklöven",
 };
 
+const HA_CANONICAL = {
+  LIF: "Leksands IF", VIS: "Visby/Roma HK", AIK: "AIK", SSK: "Södertälje SK",
+  KHC: "Kalmar HC", AIS: "Almtuna IS", MORA: "Mora IK", MODO: "MoDo Hockey",
+  BIK: "BIK Karlskoga", IKO: "IK Oskarshamn", NYB: "Nybro Vikings IF",
+  VIK: "Västerås IK", VHC: "Vimmerby HC", OIK: "Östersunds IK"
+};
 function displayTeamName(name, league) {
-  return league === "SHL" ? SHL_CANONICAL[name] || name : name;
+  if (league === "SHL") return SHL_CANONICAL[name] || name;
+  if (league === "HA") return HA_CANONICAL[String(name).toUpperCase()] || name;
+  return name;
 }
 // SHL:s officiella lagregister ger klubbmärken direkt, utan Wikimedia-sökning.
 // 2026/27 grundserie: ssgtUuid från SHL:s layout-info.
@@ -243,12 +252,20 @@ async function resolveSwedishLogo(league, name) {
   const key = logoKey(league, canonical);
   if (logoMemo.has(key)) return logoMemo.get(key);
   const sites = await loadSwedishLogoDirectory(league);
-  const targets = [canonical, name, ...(SWEDISH_CLUBS[league]?.[name] || [])].map(normalizedLogoText);
+  const targets = [canonical, name, ...(SWEDISH_CLUBS[league]?.[name] || []),
+    ...(SWEDISH_CLUBS[league]?.[canonical] || [])].map(normalizedLogoText);
   const site = sites.find((s) => [s.name, s.fullName, s.code].some((n) => targets.includes(normalizedLogoText(n))));
   let url = site?.icon || "";
   if (url.startsWith("//")) url = "https:" + url;
   else if (url.startsWith("/")) url = (league === "HA" ? "https://hockeyallsvenskan.se" : "https://www.shl.se") + url;
   if (!/^https:\/\//i.test(url)) url = "";
+  if (league === "HA" && site?.code && url) {
+    // The official image is the backup if the server-side proxy is blocked.
+    const official = url;
+    url = "/api/ha/logo/" + encodeURIComponent(site.code);
+    // Only same-origin fallback metadata; do not trust arbitrary HTML attributes.
+    logoMemo.set(key + ":official", official);
+  }
   if (url) logoMemo.set(key, url);
   return url || null;
 }
@@ -269,6 +286,12 @@ function hydrateSwedishLogos() {
     img.decoding = "async";
 
     img.onerror = () => {
+      const official = logoMemo.get(logoKey(league, displayTeamName(name, league)) + ":official");
+      if (league === "HA" && official && img.src !== official && !img.dataset.triedOfficial) {
+        img.dataset.triedOfficial = "1";
+        img.src = official;
+        return;
+      }
       if (img.isConnected) img.replaceWith(el);
     };
 
@@ -288,22 +311,6 @@ function teamMark(name, league) {
 function notice() {
   return '<section class="panel notice">ℹ️ Prognoser är statistiska uppskattningar, inte garantier. 1X2 avser resultatet efter 60 minuter – utan förlängning och straffar.</section>';
 }
-function marketOddsPanel(market, prediction) {
-  if (!market) return `<p class="muted">Inga jämförbara 1X2-odds sparade före matchstart. Odds med förlängning räknas inte.</p>`;
-  const q = market.probabilities;
-  const difference = prediction ? `<p class="muted">Skillnad mot Hockeyprognos (hemma): ${(Number(prediction.home_win)-Number(q['1'])).toFixed(1)} procentenheter</p>` : '';
-  return `<p class="muted">${esc(market.bookmakers)} spelbolag · ${esc(market.source)} · uppdaterad ${esc(formatDate(market.fetched_at))}</p>`+
-    `<div class="percent"><div><small>1 · Marknad</small><b>${pct(q['1'])}</b></div><div><small>X · Marknad</small><b>${pct(q['X'])}</b></div><div><small>2 · Marknad</small><b>${pct(q['2'])}</b></div></div>`+
-    `<p class="muted">Genomsnittsodds: 1 ${Number(market.mean_odds['1']).toFixed(2)} · X ${Number(market.mean_odds['X']).toFixed(2)} · 2 ${Number(market.mean_odds['2']).toFixed(2)}</p>${difference}`;
-}
-async function loadMarketOdds(match) {
-  const el=document.getElementById('market-odds');
-  if (!el) return;
-  try {
-    const response=await get('/api/odds/match/'+encodeURIComponent(match.id));
-    if (document.getElementById('market-odds')===el) el.innerHTML=marketOddsPanel(response.market,match.prediction);
-  } catch (e) { if (document.getElementById('market-odds')===el) el.textContent='Marknadsodds kunde inte hämtas.'; }
-}
 function card(m) {
   const p = m.prediction;
   const finished = m.status === "FINISHED";
@@ -321,7 +328,7 @@ function card(m) {
 
 // Resultat efter 60 minuter: V / O / F utifrån valt lags perspektiv.
 function teamFormResult(m, team) {
-  const home = m.home === team;
+  const home = typeof m.perspective_home === "boolean" ? m.perspective_home : m.home === team;
   const gf = Number(home ? m.score?.home : m.score?.away),
     ga = Number(home ? m.score?.away : m.score?.home);
   return gf > ga ? "V" : gf < ga ? "F" : "O";
@@ -337,7 +344,7 @@ function formDate(d) {
 function teamFormCard(team, league = "NHL") {
   const matches = state.formData[team] || [];
   const expanded = !!state.formExpanded[team];
-  const maxGames = league === "SHL" ? 10 : 20;
+  const maxGames = league === "SHL" ? 10 : league === "HA" ? 100 : 20;
   const shown = expanded ? matches.slice(0, maxGames) : matches.slice(0, 5);
   return `<section class="panel form-panel"><div class="form-heading"><div class="form-team">${teamMark(team, league)}<strong>Senast ${esc(team)}</strong></div><div class="form-dots">${matches
     .slice(0, 5)
@@ -352,7 +359,7 @@ function teamFormCard(team, league = "NHL") {
         ? '<p class="muted">Ingen historik hittades för laget.</p>'
         : `<div class="form-list">${shown
             .map((m) => {
-              const home = m.home === team;
+              const home = typeof m.perspective_home === "boolean" ? m.perspective_home : m.home === team;
               const opponent = home ? m.away : m.home;
               const gf = home ? m.score.home : m.score.away;
               const ga = home ? m.score.away : m.score.home;
@@ -364,11 +371,19 @@ function teamFormCard(team, league = "NHL") {
   }</section>`;
 }
 async function loadTeamForms(m) {
-  if (m.league !== "NHL" && m.league !== "SHL") return;
+  if (m.league !== "NHL" && m.league !== "SHL" && m.league !== "HA") return;
   state.formLoading = true;
   state.formData = {};
+  state.formError = "";
   render();
   try {
+    if (m.league === "HA") {
+      const data = await get("/api/match-form/" + encodeURIComponent(m.id) + "?limit=100");
+      if (state.detail?.id !== m.id) return;
+      state.formData[m.home] = data.home?.matches || [];
+      state.formData[m.away] = data.away?.matches || [];
+      return;
+    }
     const listing = await get(
       "/api/history?league=" + encodeURIComponent(m.league) + "&limit=1",
     );
@@ -491,9 +506,8 @@ function render() {
     const m = state.detail,
       p = m.prediction,
       d = p?.details;
-    root.innerHTML = `<button class="back" id="back">← Till matcher</button><div class="eyebrow">${esc(m.league)} · ${esc(formatDate(m.date))}</div><h1 class="title">${esc(displayTeamName(m.home, m.league))} – ${esc(displayTeamName(m.away, m.league))}</h1>${card(m)}<section class="panel"><h3>Marknadens odds · 60 minuter</h3><div id="market-odds"><p class="muted">Hämtar sparad oddsjämförelse…</p></div></section>${m.league === "SHL" ? goaliePanel() : ""}${m.league === "NHL" || m.league === "SHL" ? `<h2 class="form-section-title">Lagform · senaste ${m.league === "SHL" ? "10" : "20"} matcher</h2>${state.formError ? `<p class="muted">${esc(state.formError)}</p>` : ""}${teamFormCard(m.home, m.league)}${teamFormCard(m.away, m.league)}` : ""}${p ? `<section class="panel"><h3>Matchanalys</h3><div class="metric"><span>Förväntade mål hemma</span><strong>${p.expected_home}</strong></div><div class="metric"><span>Förväntade mål borta</span><strong>${p.expected_away}</strong></div><div class="metric"><span>Elo hemma / borta</span><strong>${d.home_elo} / ${d.away_elo}</strong></div><div class="metric"><span>Hemmaform (mål för/emot)</span><strong>${d.home_form.scored} / ${d.home_form.conceded} (${d.home_form.played} matcher)</strong></div><div class="metric"><span>Bortaform (mål för/emot)</span><strong>${d.away_form.scored} / ${d.away_form.conceded} (${d.away_form.played} matcher)</strong></div><h3>Troligaste resultat efter 60 min</h3>${d.top_scores.map((s) => `<div class="metric"><span>${esc(s.score)}</span><strong>${pct(s.probability)}</strong></div>`).join("")}</section>` : ""}${notice()}`;
+    root.innerHTML = `<button class="back" id="back">← Till matcher</button><div class="eyebrow">${esc(m.league)} · ${esc(formatDate(m.date))}</div><h1 class="title">${esc(displayTeamName(m.home, m.league))} – ${esc(displayTeamName(m.away, m.league))}</h1>${card(m)}${m.league === "SHL" ? goaliePanel() : ""}${m.league === "NHL" || m.league === "SHL" ? `<h2 class="form-section-title">Lagform · senaste ${m.league === "SHL" ? "10" : "20"} matcher</h2>${state.formError ? `<p class="muted">${esc(state.formError)}</p>` : ""}${teamFormCard(m.home, m.league)}${teamFormCard(m.away, m.league)}` : ""}${p ? `<section class="panel"><h3>Matchanalys</h3><div class="metric"><span>Förväntade mål hemma</span><strong>${p.expected_home}</strong></div><div class="metric"><span>Förväntade mål borta</span><strong>${p.expected_away}</strong></div><div class="metric"><span>Elo hemma / borta</span><strong>${d.home_elo} / ${d.away_elo}</strong></div><div class="metric"><span>Hemmaform (mål för/emot)</span><strong>${d.home_form.scored} / ${d.home_form.conceded} (${d.home_form.played} matcher)</strong></div><div class="metric"><span>Bortaform (mål för/emot)</span><strong>${d.away_form.scored} / ${d.away_form.conceded} (${d.away_form.played} matcher)</strong></div><h3>Troligaste resultat efter 60 min</h3>${d.top_scores.map((s) => `<div class="metric"><span>${esc(s.score)}</span><strong>${pct(s.probability)}</strong></div>`).join("")}</section>` : ""}${m.league === "HA" ? `<h2 class="form-section-title">Senaste spelade matcher</h2><p class="muted">Resultat och form efter 60 minuter · V / O / F</p>${state.formError ? `<p class="muted">Kunde inte läsa historiken: ${esc(state.formError)}</p>` : ""}${teamFormCard(m.home, m.league)}${teamFormCard(m.away, m.league)}` : ""}${notice()}`;
     hydrateSwedishLogos();
-    loadMarketOdds(m);
     document.getElementById("back").onclick = () => {
       state.detail = null;
       render();
