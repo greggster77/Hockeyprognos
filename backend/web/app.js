@@ -206,7 +206,7 @@ function displayTeamName(name, league) {
 // 2026/27 grundserie: ssgtUuid från SHL:s layout-info.
 const SHL_SSGT_UUID = "qa98unlbd6";
 const logoMemo = new Map();
-let shlLogoDirectoryPromise = null;
+const swedishLogoDirectories = new Map();
 const logoKey = (league, name) => league + ":" + name;
 function normalizedLogoText(v) {
   return String(v ?? "")
@@ -215,41 +215,39 @@ function normalizedLogoText(v) {
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]/g, "");
 }
-async function loadSHLLogoDirectory() {
-  if (!shlLogoDirectoryPromise) {
-    shlLogoDirectoryPromise = (async () => {
-      const r = await fetch("/api/shl/logos", {
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!r.ok) throw Error("SHL lagregister HTTP " + r.status);
+async function loadSwedishLogoDirectory(league) {
+  if (!swedishLogoDirectories.has(league)) {
+    const endpoint = league === "HA" ? "/api/ha/logos" : "/api/shl/logos";
+    const promise = (async () => {
+      const r = await fetch(endpoint, { signal: AbortSignal.timeout(12000) });
+      if (!r.ok) throw Error(league + " lagregister HTTP " + r.status);
       const data = await r.json();
-      const sites = Array.isArray(data) ? data : data.teams || [];
-      if (!Array.isArray(sites) || !sites.length)
-        throw Error("SHL lagregister saknar laglista");
-      return sites.map((s) => ({
-        name: s.name || s.displayName || s.names?.long || s.names?.short || "",
-        icon: s.logo || s.icon || "",
-        id: s.instanceId || s.instance_id || s.id || s.ownerInstanceId || "",
+      const teams = Array.isArray(data) ? data : data.teams || [];
+      return teams.map((t) => ({
+        name: t.name || t.displayName || t.fullName || t.names?.long || "",
+        fullName: t.fullName || "", code: t.code || "",
+        icon: t.icon || t.logo || ""
       }));
     })().catch((err) => {
-      console.warn("SHL-loggor kunde inte hämtas:", err);
-      shlLogoDirectoryPromise = null;
+      console.warn(league + "-loggor kunde inte hämtas:", err);
+      swedishLogoDirectories.delete(league);
       return [];
     });
+    swedishLogoDirectories.set(league, promise);
   }
-  return shlLogoDirectoryPromise;
+  return swedishLogoDirectories.get(league);
 }
 async function resolveSwedishLogo(league, name) {
-  if (league !== "SHL") return null; // HA och NHL ändras inte.
+  if (league !== "SHL" && league !== "HA") return null;
   const canonical = displayTeamName(name, league);
   const key = logoKey(league, canonical);
   if (logoMemo.has(key)) return logoMemo.get(key);
-  const sites = await loadSHLLogoDirectory();
-  const target = normalizedLogoText(canonical);
-  const site = sites.find((s) => normalizedLogoText(s.name) === target);
+  const sites = await loadSwedishLogoDirectory(league);
+  const targets = [canonical, name, ...(SWEDISH_CLUBS[league]?.[name] || [])].map(normalizedLogoText);
+  const site = sites.find((s) => [s.name, s.fullName, s.code].some((n) => targets.includes(normalizedLogoText(n))));
   let url = site?.icon || "";
   if (url.startsWith("//")) url = "https:" + url;
-  else if (url.startsWith("/")) url = "https://www.shl.se" + url;
+  else if (url.startsWith("/")) url = (league === "HA" ? "https://hockeyallsvenskan.se" : "https://www.shl.se") + url;
   if (!/^https:\/\//i.test(url)) url = "";
   if (url) logoMemo.set(key, url);
   return url || null;
@@ -282,7 +280,7 @@ function hydrateSwedishLogos() {
 function teamMark(name, league) {
   const code = league === "NHL" ? NHL_CODES[name] : null;
   if (!code) {
-    const swedish = league === "SHL" || Boolean(SWEDISH_CLUBS[league]?.[name]);
+    const swedish = league === "SHL" || league === "HA";
     return `<span class="team-initial" ${swedish ? `data-swedish-logo="1" data-league="${esc(league)}" data-team="${esc(name)}"` : ""} aria-hidden="true">${esc(name).slice(0, 2).toUpperCase()}</span>`;
   }
   return `<img class="team-logo" src="https://assets.nhle.com/logos/nhl/svg/${code}_light.svg" alt="${esc(name)} klubbmärke" loading="lazy" decoding="async" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'"><span class="team-initial" style="display:none" aria-hidden="true">${esc(code)}</span>`;

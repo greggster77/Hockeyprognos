@@ -205,12 +205,136 @@ def _ha_response_shape(value, depth=0):
     return type(value).__name__
 
 
-def ha_stats_fallback(client, season_start):
-    """HA's documented keyless POST statistics route; avoid scraping Next.js HTML.
+def _ha_teams(payload):
+    """Official club names and logos from the same HA response."""
+    teams = []
+    for team in payload.get('teams', []) if isinstance(payload, dict) else []:
+        if not isinstance(team, dict):
+            continue
+        logos = team.get('logos') or {}
+        icon = next((logos.get(k) for k in ('medium', 'small', 'large', 'icon', 'xlarge') if isinstance(logos.get(k), str) and logos.get(k)), '') if isinstance(logos, dict) else ''
+        if icon.startswith('//'):
+            icon = 'https:' + icon
+        elif icon.startswith('/'):
+            icon = 'https://hockeyallsvenskan.se' + icon
+        if not icon.startswith('https://'):
+            icon = ''
+        teams.append({'name': team.get('name') or team.get('fullName') or team.get('teamCode') or '',
+                      'fullName': team.get('fullName') or '', 'code': team.get('teamCode') or '', 'icon': icon})
+    return teams
 
-    Only regulation period totals are used for finished matches. Never silently
-    treat OT/SO final scores as 60-minute results.
-    """
+
+def _ha_date(game):
+    """Date and Time are separate fields in the actual HA API response."""
+    day = pick(game, 'Date', 'date', 'scheduled_date_time', 'start_date_time')
+    if not day:
+        return None
+    day = str(day).strip()
+    if 'T' in day or ' ' in day:
+        return day
+    clock = str(pick(game, 'Time', 'time') or '00:00').strip()
+    return day + 'T' + clock if clock else day + 'T00:00'
+
+
+def _ha_period_score(game):
+    """Require all three regulation periods; never count overtime/shootout."""
+    periods = pick(game, 'PeriodScores', 'periodScores', 'periods')
+    if not isinstance(periods, list):
+        return None
+    scores = []
+    for i, period in enumerate(periods):
+        if not isinstance(period, dict):
+            continue
+        number = integer(pick(period, 'Period', 'period', 'PeriodNumber', 'periodNumber', 'number'))
+        if number is None:
+            number = i + 1
+        if number not in (1, 2, 3):
+            continue
+        nested = pick(period, 'Score', 'score', 'GameResult', 'gameResult')
+        source = nested if isinstance(nested, dict) else period
+        h = integer(pick(source, 'Home', 'home', 'HomeScore', 'homeScore', 'homeGoals'))
+        a = integer(pick(source, 'Away', 'away', 'AwayScore', 'awayScore', 'awayGoals'))
+        if h is not None and a is not None:
+            scores.append((number, h, a))
+    by_period = {n: (h, a) for n, h, a in scores}
+    if set(by_period) != {1, 2, 3}:
+        return None
+    return (sum(by_period[n][0] for n in (1, 2, 3)), sum(by_period[n][1] for n in (1, 2, 3)))
+
+
+def parse_ha_stats(payload):
+    """Parse the observed HA JSON envelope: results, Date, HomeTeam, PeriodScores."""
+    games = payload.get('results') if isinstance(payload, dict) else None
+    if not isinstance(games, list):
+        legacy = payload.get('data', {}).get('rows') if isinstance(payload, dict) and isinstance(payload.get('data'), dict) else None
+        if isinstance(legacy, list):
+            normalized = []
+            for game in legacy:
+                home = pick(game, 'home_team_code', 'homeTeamCode')
+                away = pick(game, 'away_team_code', 'awayTeamCode')
+                when = pick(game, 'date', 'scheduled_date_time')
+                if not (home and away and when):
+                    continue
+                item = dict(id=f'HA:{when}-{home}-{away}', date=when, home_id='HA:'+str(home),
+                            away_id='HA:'+str(away), home_name=str(home), away_name=str(away), status='SCHEDULED')
+                decided = str(pick(game, 'decided_in', 'decidedIn') or '').lower()
+                if decided:
+                    score = period_goals(game)
+                    if score is None and decided in ('ft', 'regulation'):
+                        h = integer(pick(game, 'home_score', 'home_goals'))
+                        a = integer(pick(game, 'away_score', 'away_goals'))
+                        if h is not None and a is not None:
+                            score = (h, a)
+                    if score is None:
+                        continue
+                    item.update(home_goals=score[0], away_goals=score[1], status='FINISHED')
+                normalized.append(item)
+            if normalized:
+                return normalized
+        raise ValueError('HA: statistik-API saknar verifierbar results-lista')
+    teams = _ha_teams(payload)
+    team_index = {}
+    for t in teams:
+        for k in (t['name'], t['fullName'], t['code']):
+            if k:
+                team_index[str(k).casefold()] = t
+    normalized = []
+    for game in games:
+        if not isinstance(game, dict):
+            continue
+        home = pick(game, 'HomeTeam', 'homeTeam', 'home_team_name')
+        away = pick(game, 'AwayTeam', 'awayTeam', 'away_team_name')
+        when = _ha_date(game)
+        if not (home and away and when):
+            continue
+        home = str(home); away = str(away)
+        ht = team_index.get(home.casefold(), {})
+        at = team_index.get(away.casefold(), {})
+        # Stable per-team IDs across imports, using official team code when available.
+        home_id = str(ht.get('code') or home)
+        away_id = str(at.get('code') or away)
+        ident = pick(game, 'GameId', 'gameId', 'id', 'statnet_game_number') or f'{when}-{home_id}-{away_id}'
+        item = {'id': 'HA:' + str(ident), 'date': when,
+                'home_id': 'HA:' + home_id, 'away_id': 'HA:' + away_id,
+                'home_name': home, 'away_name': away, 'status': 'SCHEDULED'}
+        final = pick(game, 'GameResult', 'gameResult')
+        if isinstance(final, dict) and integer(pick(final, 'Home', 'home')) is not None and integer(pick(final, 'Away', 'away')) is not None:
+            score = _ha_period_score(game)
+            decided = str(pick(game, 'decided_in', 'decidedIn') or '').casefold()
+            if score is None and decided in ('ft', 'regulation', 'regular', '60', '60min'):
+                score = (integer(pick(final, 'Home', 'home')), integer(pick(final, 'Away', 'away')))
+            # If period shape is unknown, never use OT/SO final score as regulation score.
+            if score is None:
+                continue
+            item.update(home_goals=score[0], away_goals=score[1], status='FINISHED')
+        normalized.append(item)
+    if not normalized:
+        logging.getLogger(__name__).warning('HA API diagnostic: shape=%s', json.dumps(_ha_response_shape(payload), ensure_ascii=False)[:2400])
+        raise ValueError('HA: results innehöll inga verifierbara matcher')
+    return normalized
+
+
+def ha_stats_payload(client, season_start):
     url = 'https://hockeyallsvenskan.se/api/all-time-games-stats'
     body = dict(league='HA', phase='HA', team_side='all', team='all',
                 against_team='all', all_results='all', game_status='all',
@@ -218,54 +342,11 @@ def ha_stats_fallback(client, season_start):
                 season=str(season_start))
     response = client.post(url, json=body, headers={**HEADERS, 'Accept': 'application/json'})
     response.raise_for_status()
-    payload = response.json()
-    candidates = list(_find_ha_stats_lists(payload))
-    for games in candidates:
-        normalized = []
-        for game in games:
-            home = pick(game, 'home_team_code', 'homeTeamCode', 'home_team_name', 'homeTeamName')
-            away = pick(game, 'away_team_code', 'awayTeamCode', 'away_team_name', 'awayTeamName')
-            when = pick(game, 'scheduled_date_time', 'start_date_time', 'date', 'game_date', 'gameDate')
-            if not (home and away and when):
-                continue
-            decided = str(pick(game, 'decided_in', 'decidedIn') or '').lower()
-            is_played = decided in ('ft', 'ot', 'so', 'wo', 'regulation')
-            if decided == 'wo':
-                continue
-            item = dict(id='HA:' + str(pick(game, 'statnet_game_number', 'game_cms_id', 'game_id', 'id') or f'{when}-{home}-{away}'),
-                        date=when, home_id='HA:' + str(home), away_id='HA:' + str(away),
-                        home_name=str(pick(game, 'home_team_name', 'homeTeamName') or home),
-                        away_name=str(pick(game, 'away_team_name', 'awayTeamName') or away),
-                        status='FINISHED' if is_played else 'SCHEDULED')
-            if is_played:
-                score = period_goals(game)
-                if score is None:
-                    # For FT only, a verified regulation decision makes final goals safe.
-                    if decided in ('ft', 'regulation'):
-                        h = integer(pick(game, 'home_score', 'home_goals', 'homeScore'))
-                        a = integer(pick(game, 'away_score', 'away_goals', 'awayScore'))
-                        score = (h, a) if h is not None and a is not None else None
-                if score is None:
-                    continue
-                item.update(home_goals=score[0], away_goals=score[1])
-            normalized.append(item)
-        if normalized:
-            return normalized
-    logging.getLogger(__name__).warning('HA API diagnostic: season=%s shape=%s', season_start, json.dumps(_ha_response_shape(payload), ensure_ascii=False)[:2400])
-    raise ValueError('HA: statistik-API svarade men ingen verifierbar matchlista kunde tolkas; se HA API diagnostic i loggen')
+    return response.json()
 
 
-def _find_ha_stats_lists(node):
-    if isinstance(node, dict):
-        for value in node.values():
-            yield from _find_ha_stats_lists(value)
-    elif isinstance(node, list):
-        if node and all(isinstance(x, dict) for x in node) and any(
-                pick(x, 'home_team_code', 'homeTeamCode', 'home_team_name', 'homeTeamName') for x in node):
-            yield node
-        else:
-            for value in node:
-                yield from _find_ha_stats_lists(value)
+def ha_stats_fallback(client, season_start):
+    return parse_ha_stats(ha_stats_payload(client, season_start))
 
 
 def swedish_schedule(league):

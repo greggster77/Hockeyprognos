@@ -757,6 +757,27 @@ async def shl_goalkeepers():
             "note": "Public season statistics only. No verified starters."}
 
 
+_ha_logo_cache = {'expires': 0.0, 'result': None}
+
+
+@app.get('/api/ha/logos')
+def ha_logos():
+    from swedish_sources import ha_stats_payload, _ha_teams, HEADERS
+    current = time.monotonic()
+    if _ha_logo_cache['result'] is not None and current < _ha_logo_cache['expires']:
+        return _ha_logo_cache['result']
+    season_start = datetime.now(timezone.utc).year - (datetime.now(timezone.utc).month < 7)
+    try:
+        with httpx.Client(timeout=25, follow_redirects=True, headers=HEADERS) as client:
+            teams = _ha_teams(ha_stats_payload(client, season_start))
+        result = {'teams': teams}
+        _ha_logo_cache.update(expires=current + 86400, result=result)
+        return result
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning('HA logos unavailable: %s', exc)
+        return {'teams': []}
+
+
 @app.get("/api/shl/logos")
 def shl_logos():
     import time
