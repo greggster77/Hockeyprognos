@@ -1,5 +1,6 @@
 """Swedish hockey schedule adapters. Finished scores refer to 60 minutes only."""
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -192,6 +193,18 @@ def _find_match_lists(node):
             yield from _find_match_lists(value)
 
 
+def _ha_response_shape(value, depth=0):
+    """Log only JSON field names and types, never raw response values."""
+    if depth >= 4:
+        return type(value).__name__
+    if isinstance(value, dict):
+        return {str(k)[:64]: _ha_response_shape(v, depth + 1) for k, v in list(value.items())[:16]}
+    if isinstance(value, list):
+        return {'type': 'list', 'count': len(value),
+                'first': _ha_response_shape(value[0], depth + 1) if value else None}
+    return type(value).__name__
+
+
 def ha_stats_fallback(client, season_start):
     """HA's documented keyless POST statistics route; avoid scraping Next.js HTML.
 
@@ -238,7 +251,8 @@ def ha_stats_fallback(client, season_start):
             normalized.append(item)
         if normalized:
             return normalized
-    raise ValueError('HA: statistik-API svarade men ingen verifierbar matchlista kunde tolkas')
+    logging.getLogger(__name__).warning('HA API diagnostic: season=%s shape=%s', season_start, json.dumps(_ha_response_shape(payload), ensure_ascii=False)[:2400])
+    raise ValueError('HA: statistik-API svarade men ingen verifierbar matchlista kunde tolkas; se HA API diagnostic i loggen')
 
 
 def _find_ha_stats_lists(node):
