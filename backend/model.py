@@ -147,7 +147,7 @@ def predict(history, home_id, away_id, league="NHL", variant="current"):
     xh = max(.15, min(4.5, league_home * h_attack * a_def * elo_factor))
     xa = max(.15, min(4.5, league_away * a_attack * h_def / elo_factor))
     h2h_info = {"meetings": 0, "adjustment": 0.0}
-    if variant == "h2h" and league == "SHL":
+    if variant == "h2h":
         # Shrink head-to-head signal strongly; cap influence to avoid overfitting.
         # Completed history passed by walk-forward backtest is strictly pre-match.
         meetings = [m for m in history if

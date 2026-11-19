@@ -1145,6 +1145,36 @@ def match_form(match_id: str, limit: int = Query(20, ge=1, le=100)):
         return output
 
 
+@app.get("/api/h2h/{match_id:path}")
+def head_to_head(match_id: str, limit: int = Query(default=10, ge=1, le=50)):
+    """Verified regulation-time meetings, strictly before the selected fixture."""
+    with db() as c:
+        fixture = c.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+        if fixture is None:
+            raise HTTPException(status_code=404, detail="Matchen finns inte")
+        rows = c.execute("""SELECT date,home_id,away_id,home_name,away_name,home_goals,away_goals
+            FROM matches WHERE league=? AND status='FINISHED' AND date<?
+            AND home_goals IS NOT NULL AND away_goals IS NOT NULL
+            AND ((home_id=? AND away_id=?) OR (home_id=? AND away_id=?))
+            ORDER BY date DESC LIMIT ?""",
+            (fixture['league'], fixture['date'], fixture['home_id'], fixture['away_id'],
+             fixture['away_id'], fixture['home_id'], limit)).fetchall()
+    home_wins = draws = away_wins = 0
+    meetings = []
+    for r in rows:
+        a, b = int(r['home_goals']), int(r['away_goals'])
+        from_fixture_home = (a-b) if r['home_id']==fixture['home_id'] else (b-a)
+        outcome = '1' if from_fixture_home>0 else '2' if from_fixture_home<0 else 'X'
+        home_wins += outcome=='1'; draws += outcome=='X'; away_wins += outcome=='2'
+        meetings.append({'date':r['date'], 'home':r['home_name'], 'away':r['away_name'],
+                         'home_goals':a, 'away_goals':b, 'outcome_for_fixture':outcome})
+    return {'match_id':match_id, 'league':fixture['league'], 'home':fixture['home_name'],
+            'away':fixture['away_name'], 'total':len(meetings),
+            'home_wins':home_wins,'draws':draws,'away_wins':away_wins,
+            'meetings':meetings,
+            'method':'Endast tidigare avslutade inbördes möten, resultat efter 60 minuter. H2H påverkar inte liveprognosen.'}
+
+
 @app.get("/api/matches/{match_id:path}")
 def detail(match_id: str):
     with db() as c:
@@ -1262,7 +1292,7 @@ def backtest(league: str = "SHL", limit: int = Query(default=120, ge=20, le=300)
             eligible.append((row, prior))
     eligible = eligible[-limit:]
     results = {name: {"evaluated": 0, "correct": 0, "brier_sum": 0.0, "log_loss_sum": 0.0}
-               for name in (('current', 'experimental', 'h2h') if league == 'SHL' else ('current', 'experimental'))}
+               for name in ('current', 'experimental', 'h2h')}
     import math
     for match, prior in eligible:
         history = [HistoricalMatch(r) for r in prior]

@@ -33,6 +33,8 @@ const state = {
   shlStatsError: "",
   shlStatsLoading: false,
   shlStatsTab: "standings",
+  h2h: null,
+  h2hError: "",
 };
 state.date = state.date.split("-").join("-");
 const esc = (x) =>
@@ -455,8 +457,13 @@ function showDetail(m) {
   state.formError = "";
   state.goalies = null;
   state.goalieError = "";
+  state.h2h = null;
+  state.h2hError = "";
   render();
   loadTeamForms(m);
+  get("/api/h2h/" + encodeURIComponent(m.id) + "?limit=10")
+    .then(data => { if (state.detail?.id === m.id) { state.h2h = data; render(); } })
+    .catch(e => { if (state.detail?.id === m.id) { state.h2hError = e.message; render(); } });
 }
 function bindFormButtons() {
   document.querySelectorAll("[data-form-team]").forEach(
@@ -498,6 +505,17 @@ function shlStatisticsView() {
   document.querySelectorAll("[data-stats-tab]").forEach(el => el.onclick = () => {state.shlStatsTab=el.dataset.statsTab;render();});
 }
 
+function h2hPanel() {
+  const h = state.h2h;
+  if (!h) return `<section class="panel"><h3>🤝 Inbördes möten (H2H)</h3><p class="muted">${state.h2hError ? "Kunde inte läsa historiken: " + esc(state.h2hError) : "Hämtar tidigare möten…"}</p></section>`;
+  const games = h.meetings || [];
+  return `<section class="panel"><h3>🤝 Inbördes möten · senaste ${h.total}</h3>
+    <p class="muted">Historiska 60-minutersresultat · ingen påverkan på liveprognosen ännu</p>
+    <div class="metric"><span>${esc(h.home)} / Oavgjort / ${esc(h.away)}</span><strong>${h.home_wins} / ${h.draws} / ${h.away_wins}</strong></div>
+    ${games.length ? games.map(g => `<div class="metric"><span>${esc(g.home)} – ${esc(g.away)}<small class="accuracy-sub">${esc(formDate(g.date))}</small></span><strong>${g.home_goals}–${g.away_goals}</strong></div>`).join("") : '<p class="muted">Inga tidigare inbördes möten finns i databasen.</p>'}
+    </section>`;
+}
+
 function render() {
   document.documentElement.classList.toggle("light", state.light);
   if (state.view === "shl-stats" && !state.detail) { shlStatisticsView(); return; }
@@ -505,7 +523,7 @@ function render() {
     const m = state.detail,
       p = m.prediction,
       d = p?.details;
-    root.innerHTML = `<button class="back" id="back">← Till matcher</button><div class="eyebrow">${esc(m.league)} · ${esc(formatDate(m.date))}</div><h1 class="title">${esc(displayTeamName(m.home, m.league))} – ${esc(displayTeamName(m.away, m.league))}</h1>${card(m)}${m.league === "NHL" || m.league === "SHL" ? `<h2 class="form-section-title">Lagform · senaste ${m.league === "SHL" ? "10" : "20"} matcher</h2>${state.formError ? `<p class="muted">${esc(state.formError)}</p>` : ""}${teamFormCard(m.home, m.league)}${teamFormCard(m.away, m.league)}` : ""}${p ? `<section class="panel"><h3>Matchanalys</h3><div class="metric"><span>Förväntade mål hemma</span><strong>${p.expected_home}</strong></div><div class="metric"><span>Förväntade mål borta</span><strong>${p.expected_away}</strong></div><div class="metric"><span>Elo hemma / borta</span><strong>${d.home_elo} / ${d.away_elo}</strong></div><div class="metric"><span>Hemmaform (mål för/emot)</span><strong>${d.home_form.scored} / ${d.home_form.conceded} (${d.home_form.played} matcher)</strong></div><div class="metric"><span>Bortaform (mål för/emot)</span><strong>${d.away_form.scored} / ${d.away_form.conceded} (${d.away_form.played} matcher)</strong></div><h3>Troligaste resultat efter 60 min</h3>${d.top_scores.map((s) => `<div class="metric"><span>${esc(s.score)}</span><strong>${pct(s.probability)}</strong></div>`).join("")}</section>` : ""}${m.league === "HA" ? `<h2 class="form-section-title">Senaste spelade matcher</h2><p class="muted">Resultat och form efter 60 minuter · V / O / F</p>${state.formError ? `<p class="muted">Kunde inte läsa historiken: ${esc(state.formError)}</p>` : ""}${teamFormCard(m.home, m.league)}${teamFormCard(m.away, m.league)}` : ""}${notice()}`;
+    root.innerHTML = `<button class="back" id="back">← Till matcher</button><div class="eyebrow">${esc(m.league)} · ${esc(formatDate(m.date))}</div><h1 class="title">${esc(displayTeamName(m.home, m.league))} – ${esc(displayTeamName(m.away, m.league))}</h1>${card(m)}${m.league === "NHL" || m.league === "SHL" ? `<h2 class="form-section-title">Lagform · senaste ${m.league === "SHL" ? "10" : "20"} matcher</h2>${state.formError ? `<p class="muted">${esc(state.formError)}</p>` : ""}${teamFormCard(m.home, m.league)}${teamFormCard(m.away, m.league)}` : ""}${h2hPanel()}${p ? `<section class="panel"><h3>Matchanalys</h3><div class="metric"><span>Förväntade mål hemma</span><strong>${p.expected_home}</strong></div><div class="metric"><span>Förväntade mål borta</span><strong>${p.expected_away}</strong></div><div class="metric"><span>Elo hemma / borta</span><strong>${d.home_elo} / ${d.away_elo}</strong></div><div class="metric"><span>Hemmaform (mål för/emot)</span><strong>${d.home_form.scored} / ${d.home_form.conceded} (${d.home_form.played} matcher)</strong></div><div class="metric"><span>Bortaform (mål för/emot)</span><strong>${d.away_form.scored} / ${d.away_form.conceded} (${d.away_form.played} matcher)</strong></div><h3>Troligaste resultat efter 60 min</h3>${d.top_scores.map((s) => `<div class="metric"><span>${esc(s.score)}</span><strong>${pct(s.probability)}</strong></div>`).join("")}</section>` : ""}${m.league === "HA" ? `<h2 class="form-section-title">Senaste spelade matcher</h2><p class="muted">Resultat och form efter 60 minuter · V / O / F</p>${state.formError ? `<p class="muted">Kunde inte läsa historiken: ${esc(state.formError)}</p>` : ""}${teamFormCard(m.home, m.league)}${teamFormCard(m.away, m.league)}` : ""}${notice()}`;
     hydrateSwedishLogos();
     document.getElementById("back").onclick = () => {
       state.detail = null;
@@ -515,7 +533,7 @@ function render() {
     return;
   }
   if (state.view === "analysis") {
-    root.innerHTML = `<div class="header"><div><div class="eyebrow">STATISTIK · HOCKEY</div><h1 class="title">🧪 Modellanalys</h1><div class="muted">Backtest och prognosernas träffsäkerhet</div></div><button class="theme" id="theme">${state.light ? "🌙 Mörkt" : "☀️ Ljust"}</button></div><div class="filters"><button class="chip" id="analysis-back">← Matcher</button><button class="chip ${state.analysisLeague === "SHL" ? "active" : ""}" data-analysis-league="SHL">SHL</button><button class="chip ${state.analysisLeague === "NHL" ? "active" : ""}" data-analysis-league="NHL">NHL</button></div><section class="panel"><h3>🧪 Modelltest · ${esc(state.analysisLeague)}</h3><p class="muted">Jämför nuvarande modell med experimentell målmodell på tidigare matcher. Testet ändrar inte liveprognoserna.</p><button class="chip" id="run-backtest">Kör backtest</button><div id="backtest-result" class="muted" style="margin-top:12px"></div></section><section class="panel accuracy-panel"><h3>🎯 Modellens träffsäkerhet · ${esc(state.analysisLeague)}</h3><div id="perf">Hämtar utvärderade prognoser…</div></section>`;
+    root.innerHTML = `<div class="header"><div><div class="eyebrow">STATISTIK · HOCKEY</div><h1 class="title">🧪 Modellanalys</h1><div class="muted">Backtest och prognosernas träffsäkerhet</div></div><button class="theme" id="theme">${state.light ? "🌙 Mörkt" : "☀️ Ljust"}</button></div><div class="filters"><button class="chip" id="analysis-back">← Matcher</button><button class="chip ${state.analysisLeague === "SHL" ? "active" : ""}" data-analysis-league="SHL">SHL</button><button class="chip ${state.analysisLeague === "NHL" ? "active" : ""}" data-analysis-league="NHL">NHL</button><button class="chip ${state.analysisLeague === "HA" ? "active" : ""}" data-analysis-league="HA">HA</button></div><section class="panel"><h3>🧪 Modelltest · ${esc(state.analysisLeague)}</h3><p class="muted">Jämför nuvarande modell med experimentell målmodell på tidigare matcher. Testet ändrar inte liveprognoserna.</p><button class="chip" id="run-backtest">Kör backtest</button><div id="backtest-result" class="muted" style="margin-top:12px"></div></section><section class="panel accuracy-panel"><h3>🎯 Modellens träffsäkerhet · ${esc(state.analysisLeague)}</h3><div id="perf">Hämtar utvärderade prognoser…</div></section>`;
     document.getElementById("theme").onclick = () => {
       state.light = !state.light;
       localStorage.setItem("theme", state.light ? "light" : "dark");
@@ -545,8 +563,9 @@ function render() {
         const fmt = (x, digits = 3) =>
           x == null ? "–" : Number(x).toFixed(digits);
         const a = data.models.current,
-          b = data.models.experimental;
-        output.innerHTML = `<p>${esc(data.method)}</p><div class="accuracy-stats"><div><strong>${a.evaluated}</strong><span>Jämförda matcher</span></div><div><strong>${fmt(a.accuracy_pct, 1)}%</strong><span>Nuvarande träff</span></div><div><strong>${fmt(b.accuracy_pct, 1)}%</strong><span>Experiment träff</span></div></div><div class="metric"><span>Brier · nuvarande / experiment</span><strong>${fmt(a.mean_brier)} / ${fmt(b.mean_brier)}</strong></div><div class="metric"><span>Log loss · nuvarande / experiment</span><strong>${fmt(a.mean_log_loss)} / ${fmt(b.mean_log_loss)}</strong></div><p class="muted">${esc(data.warning)}</p>`;
+          b = data.models.experimental,
+          h = data.models.h2h;
+        output.innerHTML = `<p>${esc(data.method)}</p><div class="accuracy-stats"><div><strong>${a.evaluated}</strong><span>Jämförda matcher</span></div><div><strong>${fmt(a.accuracy_pct, 1)}%</strong><span>Nuvarande träff</span></div><div><strong>${fmt(b.accuracy_pct, 1)}%</strong><span>Experiment träff</span></div><div><strong>${fmt(h?.accuracy_pct, 1)}%</strong><span>H2H träff</span></div></div><div class="metric"><span>Brier · nuvarande / experiment</span><strong>${fmt(a.mean_brier)} / ${fmt(b.mean_brier)}</strong></div><div class="metric"><span>Log loss · nuvarande / experiment / H2H</span><strong>${fmt(a.mean_log_loss)} / ${fmt(b.mean_log_loss)} / ${fmt(h?.mean_log_loss)}</strong></div><div class="metric"><span>Brier · H2H</span><strong>${fmt(h?.mean_brier)}</strong></div><p class="muted">${esc(data.warning)}</p>`;
       } catch (e) {
         output.textContent = "Kunde inte köra modelltest: " + e.message;
       } finally {
