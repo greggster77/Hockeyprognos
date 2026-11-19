@@ -1,0 +1,6 @@
+Hockeyprognos 3.9.8
+- Normalizes historical match dates to timezone-aware UTC in the prediction model. This prevents a mixed naive/aware timestamp exception during HA prediction.
+- Adds read-only /api/ha/forecast-check to show model output or exact failure for three upcoming fixtures and whether a prediction is stored.
+- Adds HA forecast count to Render logs.
+- Existing HA logos, SHL, NHL, and odds integration are unchanged.
+- Live production forecast results must be verified after deployment.

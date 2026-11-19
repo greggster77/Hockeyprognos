@@ -3,6 +3,22 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from math import log
 
+def parse_match_datetime(value):
+    """Normalize mixed HA/SHL/NHL timestamps to aware UTC for safe age weighting."""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value).strip().replace('Z', '+00:00')
+        parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        # Historic source timestamps without an offset are interpreted as
+        # Swedish local time for HA/SHL; for differences a consistent offset
+        # is more important than a one-hour seasonal boundary.
+        from zoneinfo import ZoneInfo
+        parsed = parsed.replace(tzinfo=ZoneInfo('Europe/Stockholm'))
+    return parsed.astimezone(timezone.utc)
+
+
 def poisson(k: int, lam: float) -> float:
     if k < 0 or lam < 0: raise ValueError('Invalid Poisson inputs')
     return exp(-lam) * lam**k / factorial(k)
@@ -83,7 +99,7 @@ def predict(history, home_id, away_id, league="NHL", variant="current"):
     for m in history:
         if m.home_goals is None or m.away_goals is None:
             continue
-        d = datetime.fromisoformat(m.date.replace('Z', '+00:00'))
+        d = parse_match_datetime(m.date)
         season = d.year if d.month >= season_start_month else d.year - 1
         if previous_season is not None and season != previous_season:
             for team in list(ratings):
@@ -98,10 +114,10 @@ def predict(history, home_id, away_id, league="NHL", variant="current"):
         raise ValueError("För få matcher för något av lagen (minst 3).")
     # Half-life 365 days: prior seasons contribute without overwhelming form.
     # The latest completed match is the reference point; no future data used.
-    latest = datetime.fromisoformat(history[-1].date.replace('Z', '+00:00'))
+    latest = parse_match_datetime(history[-1].date)
     weighted = []
     for m in history:
-        when = datetime.fromisoformat(m.date.replace('Z', '+00:00'))
+        when = parse_match_datetime(m.date)
         age_days = max(0.0, (latest - when).total_seconds() / 86400)
         weighted.append(0.5 ** (age_days / 365.0))
     total_weight = sum(weighted)

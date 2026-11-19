@@ -437,6 +437,7 @@ def recompute():
             (now(),),
         ).fetchall()
 
+        ha_forecasts_created = 0
         for match in upcoming:
             # Refresh upcoming forecasts after each import, so newly finished
             # matches affect probabilities. Historical predictions remain frozen.
@@ -496,6 +497,8 @@ def recompute():
                 ),
             )
 
+            if match["league"] == "HA":
+                ha_forecasts_created += 1
             c.execute(
                 """
                 INSERT INTO predictions
@@ -513,6 +516,7 @@ def recompute():
                 ),
             )
 
+        log.info("HA forecasts recomputed: %d", ha_forecasts_created)
         finished = c.execute(
             """
             SELECT
@@ -813,6 +817,29 @@ def ha_logo_image(team_code: str):
     except (httpx.HTTPError, ValueError) as exc:
         log.warning('HA logo fetch failed for %s: %s', team_code, exc)
         raise HTTPException(status_code=502, detail='Logo source unavailable')
+
+
+@app.get('/api/ha/forecast-check')
+def ha_forecast_check():
+    """Read-only model check: pinpoint compute vs persistence without changing data."""
+    with db() as c:
+        fixtures = c.execute("SELECT id,date,home_id,away_id FROM matches WHERE league='HA' AND status='SCHEDULED' ORDER BY date LIMIT 3").fetchall()
+        output = []
+        for fixture in fixtures:
+            hist = c.execute("SELECT date,home_id,away_id,home_goals,away_goals FROM matches WHERE league='HA' AND status='FINISHED' AND date<? AND home_goals IS NOT NULL AND away_goals IS NOT NULL ORDER BY date,id", (fixture['date'],)).fetchall()
+            row = {'match_id': fixture['id'], 'history': len(hist), 'home_games': sum(x['home_id']==fixture['home_id'] or x['away_id']==fixture['home_id'] for x in hist), 'away_games': sum(x['home_id']==fixture['away_id'] or x['away_id']==fixture['away_id'] for x in hist)}
+            stored = c.execute('SELECT match_id FROM predictions WHERE match_id=?', (fixture['id'],)).fetchone()
+            row['stored'] = bool(stored)
+            try:
+                result = predict([HistoricalMatch(x) for x in hist], fixture['home_id'], fixture['away_id'], league='HA')
+                row['model'] = 'ok'
+                row['probabilities'] = {k: result[k] for k in ('home_win','draw','away_win')}
+            except Exception as exc:
+                row['model'] = 'error'
+                row['error_type'] = type(exc).__name__
+                row['error'] = str(exc)[:250]
+            output.append(row)
+    return {'league': 'HA', 'checks': output}
 
 
 @app.get('/api/ha/diagnostics')
