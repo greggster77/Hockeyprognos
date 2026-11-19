@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -780,6 +780,47 @@ def ha_logos():
     except (httpx.HTTPError, ValueError) as exc:
         log.warning('HA logos unavailable: %s', exc)
         return {'teams': []}
+
+
+@app.get('/api/ha/logo/{team_code}')
+def ha_logo_image(team_code: str):
+    """Serve an official HA image from our domain to avoid browser hotlink/CORS issues."""
+    from urllib.parse import urlparse
+    from swedish_sources import _ha_key
+    directory = ha_logos().get('teams', [])
+    selected = next((team for team in directory if _ha_key(team.get('code')) == _ha_key(team_code)), None)
+    if not selected or not selected.get('icon'):
+        raise HTTPException(status_code=404, detail='HA club logo not available')
+    url = selected['icon']
+    parsed = urlparse(url)
+    if parsed.scheme != 'https' or not parsed.hostname:
+        raise HTTPException(status_code=404, detail='Invalid logo address')
+    try:
+        with httpx.Client(timeout=12, follow_redirects=True) as client:
+            result = client.get(url, headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://hockeyallsvenskan.se/', 'Accept': 'image/*'})
+            result.raise_for_status()
+            kind = result.headers.get('content-type', '').split(';')[0].lower()
+            if kind not in ('image/png', 'image/jpeg', 'image/webp', 'image/svg+xml', 'image/gif') or len(result.content) > 1500000:
+                raise ValueError('Unexpected logo payload')
+            return Response(content=result.content, media_type=kind, headers={'Cache-Control': 'public, max-age=86400'})
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning('HA logo fetch failed for %s: %s', team_code, exc)
+        raise HTTPException(status_code=502, detail='Logo source unavailable')
+
+
+@app.get('/api/ha/diagnostics')
+def ha_diagnostics():
+    """Read-only counts from Neon/SQLite; does not expose connection credentials."""
+    with db() as c:
+        counts = c.execute("SELECT status, COUNT(*) AS n FROM matches WHERE league='HA' GROUP BY status").fetchall()
+        finished = c.execute("SELECT COUNT(*) AS n FROM matches WHERE league='HA' AND status='FINISHED' AND home_goals IS NOT NULL AND away_goals IS NOT NULL").fetchone()['n']
+        predictions = c.execute("SELECT COUNT(*) AS n FROM predictions p JOIN matches m ON m.id=p.match_id WHERE m.league='HA'").fetchone()['n']
+        teams = c.execute("SELECT COUNT(DISTINCT home_id) AS n FROM matches WHERE league='HA' AND status='FINISHED'").fetchone()['n']
+    directory = ha_logos().get('teams', [])
+    return {'league': 'HA', 'matches_by_status': {r['status']: r['n'] for r in counts},
+            'verified_finished': finished, 'teams_with_home_results': teams,
+            'predictions': predictions, 'logo_directory_teams': len(directory),
+            'logos_with_urls': sum(bool(x.get('icon')) for x in directory)}
 
 
 @app.get("/api/shl/logos")

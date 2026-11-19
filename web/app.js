@@ -258,6 +258,7 @@ async function resolveSwedishLogo(league, name) {
   if (url.startsWith("//")) url = "https:" + url;
   else if (url.startsWith("/")) url = (league === "HA" ? "https://hockeyallsvenskan.se" : "https://www.shl.se") + url;
   if (!/^https:\/\//i.test(url)) url = "";
+  if (league === "HA" && site?.code && url) url = "/api/ha/logo/" + encodeURIComponent(site.code);
   if (url) logoMemo.set(key, url);
   return url || null;
 }

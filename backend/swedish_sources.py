@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime, timezone
 from html import unescape
+from urllib.parse import urljoin
 
 import httpx
 
@@ -243,10 +244,8 @@ def _ha_teams(payload):
             continue
         logos = team.get('logos') or {}
         icon = next((logos.get(k) for k in ('medium', 'small', 'large', 'icon', 'xlarge') if isinstance(logos.get(k), str) and logos.get(k)), '') if isinstance(logos, dict) else ''
-        if icon.startswith('//'):
-            icon = 'https:' + icon
-        elif icon.startswith('/'):
-            icon = 'https://hockeyallsvenskan.se' + icon
+        if icon:
+            icon = urljoin('https://hockeyallsvenskan.se/', icon)
         if not icon.startswith('https://'):
             icon = ''
         teams.append({'name': team.get('name') or team.get('fullName') or team.get('teamCode') or '',
@@ -280,10 +279,14 @@ def _ha_period_score(game):
             number = i + 1
         if number not in (1, 2, 3):
             continue
-        nested = pick(period, 'Score', 'score', 'GameResult', 'gameResult')
+        nested = pick(period, 'Score', 'score', 'GameResult', 'gameResult', 'result')
         source = nested if isinstance(nested, dict) else period
-        h = integer(pick(source, 'Home', 'home', 'HomeScore', 'homeScore', 'homeGoals'))
-        a = integer(pick(source, 'Away', 'away', 'AwayScore', 'awayScore', 'awayGoals'))
+        h = integer(pick(source, 'Home', 'home', 'HomeScore', 'homeScore', 'homeGoals', 'home_score'))
+        a = integer(pick(source, 'Away', 'away', 'AwayScore', 'awayScore', 'awayGoals', 'away_score'))
+        if (h is None or a is None) and isinstance(nested, str):
+            found = re.fullmatch(r'\s*(\d+)\s*[-:]\s*(\d+)\s*', nested)
+            if found:
+                h, a = int(found.group(1)), int(found.group(2))
         if h is not None and a is not None:
             scores.append((number, h, a))
     by_period = {n: (h, a) for n, h, a in scores}
@@ -325,6 +328,8 @@ def parse_ha_stats(payload):
     teams = _ha_teams(payload)
     team_index = _ha_team_index(teams)
     normalized = []
+    unverified_finished = 0
+    period_example = None
     for game in games:
         if not isinstance(game, dict):
             continue
@@ -353,12 +358,19 @@ def parse_ha_stats(payload):
                 score = (integer(pick(final, 'Home', 'home')), integer(pick(final, 'Away', 'away')))
             # If period shape is unknown, never use OT/SO final score as regulation score.
             if score is None:
+                unverified_finished += 1
+                if period_example is None:
+                    periods = pick(game, 'PeriodScores', 'periodScores', 'periods')
+                    period_example = _ha_response_shape({'periods': periods})
+                # Never mislabel a played match as upcoming or use OT goals.
                 continue
             item.update(home_goals=score[0], away_goals=score[1], status='FINISHED')
         normalized.append(item)
     if not normalized:
         logging.getLogger(__name__).warning('HA API diagnostic: shape=%s', json.dumps(_ha_response_shape(payload), ensure_ascii=False)[:2400])
         raise ValueError('HA: results innehöll inga verifierbara matcher')
+    if unverified_finished:
+        logging.getLogger(__name__).warning('HA regulation scores unverified: %d games; period structure=%s', unverified_finished, json.dumps(period_example, ensure_ascii=False)[:1000])
     logging.getLogger(__name__).info('HA parsed: %d matches, %d finished (60 min), %d scheduled, %d registered teams',
         len(normalized), sum(g['status'] == 'FINISHED' for g in normalized),
         sum(g['status'] == 'SCHEDULED' for g in normalized), len(teams))
