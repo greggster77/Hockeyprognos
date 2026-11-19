@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response, Header
 from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -1492,8 +1492,8 @@ def latest_model_evaluation():
 
 
 # 3.11: self-training experimental calibration. Never overrides live predictions.
-def refresh_ai_learning():
-    for league in LEAGUES:
+def refresh_ai_learning(only_league=None):
+    for league in ([only_league] if only_league else LEAGUES):
         try:
             with db() as c:
                 rows = c.execute("""SELECT * FROM matches WHERE league=? AND status='FINISHED'
@@ -1533,6 +1533,32 @@ def refresh_ai_learning():
             log.exception('AI learning failed for %s', league)
 
 
+# Manual training is authenticated and runs in the background, never in a GET request.
+_ai_manual_lock = threading.Lock()
+_ai_manual_running = set()
+
+def _manual_ai_worker(league):
+    try:
+        refresh_ai_learning(league)
+    finally:
+        with _ai_manual_lock:
+            _ai_manual_running.discard(league)
+
+@app.post('/api/ai/training/run')
+def run_ai_training(league: str = 'SHL', x_training_token: str | None = Header(default=None)):
+    if league not in LEAGUES:
+        raise HTTPException(status_code=400, detail='Okänd liga')
+    expected = os.getenv('TRAINING_ADMIN_TOKEN', '')
+    import secrets
+    if not expected or not x_training_token or not secrets.compare_digest(x_training_token, expected):
+        raise HTTPException(status_code=403, detail='Behörighet saknas. Konfigurera TRAINING_ADMIN_TOKEN i Render.')
+    with _ai_manual_lock:
+        if league in _ai_manual_running:
+            return {'league': league, 'status': 'already_running', 'live_model_changed': False}
+        _ai_manual_running.add(league)
+    threading.Thread(target=_manual_ai_worker, args=(league,), daemon=True).start()
+    return {'league': league, 'status': 'started', 'live_model_changed': False}
+
 @app.get('/api/ai/training')
 def ai_training_status(league: str = 'SHL'):
     if league not in LEAGUES:
@@ -1541,6 +1567,8 @@ def ai_training_status(league: str = 'SHL'):
         c.execute("""CREATE TABLE IF NOT EXISTS ai_training_reports
                      (league TEXT PRIMARY KEY, trained_at TEXT NOT NULL, payload TEXT NOT NULL)""")
         row = c.execute('SELECT * FROM ai_training_reports WHERE league=?', (league,)).fetchone()
+    if league in _ai_manual_running:
+        return {'league': league, 'status': 'training_in_progress', 'live_model_changed': False}
     if row is None:
         return {'league': league, 'status': 'awaiting_first_weekly_training',
                 'schedule': 'Monday 04:15 Europe/Stockholm (when server is running)',

@@ -533,7 +533,7 @@ function render() {
     return;
   }
   if (state.view === "analysis") {
-    root.innerHTML = `<div class="header"><div><div class="eyebrow">STATISTIK · HOCKEY</div><h1 class="title">🧪 Modellanalys</h1><div class="muted">Backtest och prognosernas träffsäkerhet</div></div><button class="theme" id="theme">${state.light ? "🌙 Mörkt" : "☀️ Ljust"}</button></div><div class="filters"><button class="chip" id="analysis-back">← Matcher</button><button class="chip ${state.analysisLeague === "SHL" ? "active" : ""}" data-analysis-league="SHL">SHL</button><button class="chip ${state.analysisLeague === "NHL" ? "active" : ""}" data-analysis-league="NHL">NHL</button><button class="chip ${state.analysisLeague === "HA" ? "active" : ""}" data-analysis-league="HA">HA</button></div><section class="panel"><h3>🧪 Modelltest · ${esc(state.analysisLeague)}</h3><p class="muted">Jämför nuvarande modell med experimentell målmodell på tidigare matcher. Testet ändrar inte liveprognoserna.</p><button class="chip" id="run-backtest">Kör backtest</button><div id="backtest-result" class="muted" style="margin-top:12px"></div></section><section class="panel accuracy-panel"><h3>🎯 Modellens träffsäkerhet · ${esc(state.analysisLeague)}</h3><div id="perf">Hämtar utvärderade prognoser…</div></section>`;
+    root.innerHTML = `<div class="header"><div><div class="eyebrow">STATISTIK · HOCKEY</div><h1 class="title">🧪 Modellanalys</h1><div class="muted">Backtest och prognosernas träffsäkerhet</div></div><button class="theme" id="theme">${state.light ? "🌙 Mörkt" : "☀️ Ljust"}</button></div><div class="filters"><button class="chip" id="analysis-back">← Matcher</button><button class="chip ${state.analysisLeague === "SHL" ? "active" : ""}" data-analysis-league="SHL">SHL</button><button class="chip ${state.analysisLeague === "NHL" ? "active" : ""}" data-analysis-league="NHL">NHL</button><button class="chip ${state.analysisLeague === "HA" ? "active" : ""}" data-analysis-league="HA">HA</button></div><section class="panel"><h3>🧪 Modelltest · ${esc(state.analysisLeague)}</h3><p class="muted">Jämför nuvarande modell med experimentell målmodell på tidigare matcher. Testet ändrar inte liveprognoserna.</p><button class="chip" id="run-backtest">Kör backtest</button><div id="backtest-result" class="muted" style="margin-top:12px"></div></section><section class="panel"><h3>🧠 AI-träning · ${esc(state.analysisLeague)}</h3><p class="muted">Träna en experimentell kandidat på historiska matcher. Liveprognoserna ändras inte. Kräver en administratörsnyckel som du ställer in i Render.</p><div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center"><input id="ai-admin-token" type="password" placeholder="Administratörsnyckel" autocomplete="off" style="min-width:190px;padding:10px;border-radius:8px"/><button class="chip" id="run-ai-training">Starta AI-träning</button><button class="chip" id="refresh-ai-status">Uppdatera status</button></div><div id="ai-training-status" class="muted" style="margin-top:12px">Läser träningsstatus…</div></section><section class="panel accuracy-panel"><h3>🎯 Modellens träffsäkerhet · ${esc(state.analysisLeague)}</h3><div id="perf">Hämtar utvärderade prognoser…</div></section>`;
     document.getElementById("theme").onclick = () => {
       state.light = !state.light;
       localStorage.setItem("theme", state.light ? "light" : "dark");
@@ -550,6 +550,38 @@ function render() {
           render();
         }),
     );
+    const aiStatus = document.getElementById("ai-training-status");
+    const refreshAI = async () => {
+      const league = state.analysisLeague;
+      try {
+        const d = await get("/api/ai/training?league=" + encodeURIComponent(league));
+        if (!aiStatus.isConnected || state.analysisLeague !== league) return;
+        const statusNames = {awaiting_first_weekly_training:"Inväntar första träning",training_in_progress:"Träning pågår",insufficient_data:"För få historiska matcher",evaluated:"Träning och utvärdering genomförd"};
+        const fmt = x => x == null ? "–" : Number(x).toFixed(3);
+        aiStatus.innerHTML = `<p><strong>${esc(statusNames[d.status] || d.status || "Okänd status")}</strong></p>` +
+          (d.available_samples != null ? `<p>Matcher tillgängliga: ${esc(d.available_samples)} (minst ${esc(d.minimum_samples)})</p>` : "") +
+          (d.training_matches != null ? `<p>Träningsmatcher: ${esc(d.training_matches)} · Testmatcher: ${esc(d.validation_matches)}</p>` : "") +
+          (d.baseline && d.candidate ? `<div class="metric"><span>Träff: nuvarande / AI</span><strong>${fmt(d.baseline.accuracy_pct)}% / ${fmt(d.candidate.accuracy_pct)}%</strong></div><div class="metric"><span>Brier: nuvarande / AI</span><strong>${fmt(d.baseline.mean_brier)} / ${fmt(d.candidate.mean_brier)}</strong></div><div class="metric"><span>Log loss: nuvarande / AI</span><strong>${fmt(d.baseline.mean_log_loss)} / ${fmt(d.candidate.mean_log_loss)}</strong></div>` : "") +
+          `<p class="muted">Liveprognoser: oförändrade. ${esc(d.warning || "")}</p>`;
+      } catch (e) { if (aiStatus.isConnected) aiStatus.textContent = "Kunde inte läsa AI-status: " + e.message; }
+    };
+    document.getElementById("refresh-ai-status").onclick = refreshAI;
+    document.getElementById("run-ai-training").onclick = async () => {
+      const button = document.getElementById("run-ai-training");
+      const key = document.getElementById("ai-admin-token").value;
+      if (!key) { aiStatus.textContent = "Ange administratörsnyckeln från Render."; return; }
+      button.disabled = true;
+      aiStatus.textContent = "Startar AI-träning…";
+      try {
+        const res = await fetch("/api/ai/training/run?league=" + encodeURIComponent(state.analysisLeague), {method:"POST", headers:{"X-Training-Token":key}});
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.detail || `HTTP ${res.status}`);
+        aiStatus.textContent = d.status === "already_running" ? "Träning pågår redan. Uppdatera status om en stund." : "AI-träning startad. Uppdatera status om en stund.";
+        document.getElementById("ai-admin-token").value = "";
+      } catch(e) { aiStatus.textContent = "Kunde inte starta: " + e.message; }
+      finally { button.disabled = false; }
+    };
+    refreshAI();
     document.getElementById("run-backtest").onclick = async () => {
       const output = document.getElementById("backtest-result");
       const button = document.getElementById("run-backtest");
