@@ -192,6 +192,68 @@ def _find_match_lists(node):
             yield from _find_match_lists(value)
 
 
+def ha_stats_fallback(client, season_start):
+    """HA's documented keyless POST statistics route; avoid scraping Next.js HTML.
+
+    Only regulation period totals are used for finished matches. Never silently
+    treat OT/SO final scores as 60-minute results.
+    """
+    url = 'https://hockeyallsvenskan.se/api/all-time-games-stats'
+    body = dict(league='HA', phase='HA', team_side='all', team='all',
+                against_team='all', all_results='all', game_status='all',
+                decided_in='all', categories='all', page=1, page_size=1000,
+                season=str(season_start))
+    response = client.post(url, json=body, headers={**HEADERS, 'Accept': 'application/json'})
+    response.raise_for_status()
+    payload = response.json()
+    candidates = list(_find_ha_stats_lists(payload))
+    for games in candidates:
+        normalized = []
+        for game in games:
+            home = pick(game, 'home_team_code', 'homeTeamCode', 'home_team_name', 'homeTeamName')
+            away = pick(game, 'away_team_code', 'awayTeamCode', 'away_team_name', 'awayTeamName')
+            when = pick(game, 'scheduled_date_time', 'start_date_time', 'date', 'game_date', 'gameDate')
+            if not (home and away and when):
+                continue
+            decided = str(pick(game, 'decided_in', 'decidedIn') or '').lower()
+            is_played = decided in ('ft', 'ot', 'so', 'wo', 'regulation')
+            if decided == 'wo':
+                continue
+            item = dict(id='HA:' + str(pick(game, 'statnet_game_number', 'game_cms_id', 'game_id', 'id') or f'{when}-{home}-{away}'),
+                        date=when, home_id='HA:' + str(home), away_id='HA:' + str(away),
+                        home_name=str(pick(game, 'home_team_name', 'homeTeamName') or home),
+                        away_name=str(pick(game, 'away_team_name', 'awayTeamName') or away),
+                        status='FINISHED' if is_played else 'SCHEDULED')
+            if is_played:
+                score = period_goals(game)
+                if score is None:
+                    # For FT only, a verified regulation decision makes final goals safe.
+                    if decided in ('ft', 'regulation'):
+                        h = integer(pick(game, 'home_score', 'home_goals', 'homeScore'))
+                        a = integer(pick(game, 'away_score', 'away_goals', 'awayScore'))
+                        score = (h, a) if h is not None and a is not None else None
+                if score is None:
+                    continue
+                item.update(home_goals=score[0], away_goals=score[1])
+            normalized.append(item)
+        if normalized:
+            return normalized
+    raise ValueError('HA: statistik-API svarade men ingen verifierbar matchlista kunde tolkas')
+
+
+def _find_ha_stats_lists(node):
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from _find_ha_stats_lists(value)
+    elif isinstance(node, list):
+        if node and all(isinstance(x, dict) for x in node) and any(
+                pick(x, 'home_team_code', 'homeTeamCode', 'home_team_name', 'homeTeamName') for x in node):
+            yield node
+        else:
+            for value in node:
+                yield from _find_ha_stats_lists(value)
+
+
 def swedish_schedule(league):
     now = datetime.now(timezone.utc)
     end_year = now.year + (now.month >= 7)
@@ -214,13 +276,16 @@ def swedish_schedule(league):
         if league == 'HA':
             response = client.get(HA_PAGE)
             response.raise_for_status()
-            payload = _ha_embedded_payload(response.text)
-            for matches in _find_match_lists(payload):
-                try:
-                    return normalize_flat('HA', matches)
-                except ValueError:
-                    continue
-            raise ValueError('HA: kunde inte hitta en matchlista i sidans inbäddade data; ange HA_FEED_URL')
+            try:
+                payload = _ha_embedded_payload(response.text)
+                for matches in _find_match_lists(payload):
+                    try:
+                        return normalize_flat('HA', matches)
+                    except ValueError:
+                        continue
+            except (ValueError, json.JSONDecodeError):
+                pass
+            return ha_stats_fallback(client, end_year - 1)
     raise ValueError(f'Okänd svensk liga: {league}')
 
 
