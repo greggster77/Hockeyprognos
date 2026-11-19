@@ -51,6 +51,7 @@ def train(samples, league):
             'first_validation_match': validation[0]['date'],
             'parameters': {'h2h_blend': blend, 'temperature': temperature},
             'baseline': baseline, 'candidate': candidate, 'diagnostics': diagnose(validation, blend, temperature),
+            'insights': recommend(diagnose(validation, blend, temperature), baseline, candidate),
             'validation_log_loss_improvement': round(improvement, 5),
             'candidate_better_on_holdout': improvement > 0,
             'live_model_changed': False,
@@ -105,3 +106,54 @@ def diagnose(validation, blend, temperature):
             'baseline_and_ai_both_wrong': both_wrong, 'ai_corrected_baseline_errors': corrected,
             'ai_introduced_errors': worsened, 'recent_ai_misses': errors[-12:][::-1],
             'note': 'Enbart senare testmatcher. Små grupper ger osäkra procentsatser.'}
+
+
+def recommend(diagnostics, baseline, candidate):
+    """Suggest future experiments only; no validation-set fitting or model activation."""
+    suggestions = []
+    n = candidate['matches']
+    delta = round(candidate['accuracy_pct'] - baseline['accuracy_pct'], 2)
+    suggestions.append({
+        'kind': 'comparison', 'title': 'AI jämfört med grundmodellen',
+        'evidence': f"{n} testmatcher; AI {candidate['accuracy_pct']} %, grundmodell {baseline['accuracy_pct']} % (skillnad {delta:+.2f} procentenheter).",
+        'next_test': 'Samla fler framtida matcher och jämför Brier, log loss och träffprocent på en helt ny testperiod.',
+        'confidence': 'preliminary' if n < 100 else 'exploratory',
+    })
+    for outcome, item in diagnostics['outcomes'].items():
+        if item['actual'] >= 15 and item['recall_pct'] is not None and item['recall_pct'] < 40:
+            suggestions.append({
+                'kind': 'outcome', 'title': f'Låg upptäckt av utfall {outcome}',
+                'evidence': f"{item['correct']} av {item['actual']} verkliga {outcome}-utfall identifierades ({item['recall_pct']} % recall).",
+                'next_test': 'Pröva separat kalibrering för detta utfall på träningsdata; verifiera på senare matcher.',
+                'confidence': 'exploratory',
+            })
+    for name, item in diagnostics['match_types'].items():
+        if item['matches'] >= 20 and item['ai_accuracy_pct'] is not None and item['baseline_accuracy_pct'] is not None:
+            diff = round(item['ai_accuracy_pct'] - item['baseline_accuracy_pct'], 1)
+            if diff <= -5:
+                label = {'hemmafavorit':'hemmafavoriter','bortafavorit':'bortafavoriter','oavgjort_favorit':'oavgjortfavoriter','jämn_match':'jämna matcher','tydlig_favorit':'tydliga favoriter'}[name]
+                suggestions.append({
+                    'kind': 'match_type', 'title': f'AI presterar sämre för {label}',
+                    'evidence': f"{item['matches']} matcher; AI {item['ai_accuracy_pct']} %, grundmodell {item['baseline_accuracy_pct']} %.",
+                    'next_test': 'Undersök sannolikhetskalibrering och H2H-vikt för denna matchtyp på en ny träningsperiod.',
+                    'confidence': 'exploratory',
+                })
+    for name, item in diagnostics['confidence_bins'].items():
+        if item['matches'] >= 20 and item['accuracy_pct'] is not None:
+            gap = round(item['accuracy_pct'] - item['average_confidence_pct'], 1)
+            if abs(gap) >= 10:
+                suggestions.append({
+                    'kind': 'calibration', 'title': 'Möjlig felkalibrering av sannolikheter',
+                    'evidence': f"{item['matches']} matcher i {name}; genomsnittlig säkerhet {item['average_confidence_pct']} %, utfall {item['accuracy_pct']} % (skillnad {gap:+.1f} p.e.).",
+                    'next_test': 'Testa temperaturkalibrering med träningsdata och mät förbättringen på en ny period.',
+                    'confidence': 'exploratory',
+                })
+    if n < 100:
+        suggestions.append({
+            'kind': 'data', 'title': 'Utöka utvärderingsunderlaget',
+            'evidence': f'Endast {n} matcher i den senare testperioden. Små skillnader kan bero på slumpen.',
+            'next_test': 'Importera verifierade äldre 60-minutersresultat och spara kommande förhandsprognoser; utvärdera kronologiskt.',
+            'confidence': 'high',
+        })
+    return {'recommendations': suggestions,
+            'policy': 'Förslag är hypoteser, inte bevis. Testperioden används bara för utvärdering; inga parametrar väljs eller aktiveras utifrån dessa förslag.'}
