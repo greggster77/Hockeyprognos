@@ -292,7 +292,17 @@ function notice() {
 }
 function card(m) {
   const p = m.prediction;
-  return `<article class="panel match" data-id="${esc(m.id)}"><div class="topline"><span>${esc(m.league)} · ${esc(formatDate(m.date))}</span><span>${m.status === "FINISHED" ? "60 min: " + m.score.home + "–" + m.score.away : "Kommande"}</span></div><div class="teams"><div class="team-side">${teamMark(m.home, m.league)}<span>${esc(displayTeamName(m.home, m.league))}</span></div><span class="vs">VS</span><div class="team-side">${teamMark(m.away, m.league)}<span>${esc(displayTeamName(m.away, m.league))}</span></div></div>${p ? `<div class="percent"><div><small>1 · Hemma</small><b>${pct(p.home_win)}</b></div><div><small>X · Oavgjort</small><b>${pct(p.draw)}</b></div><div><small>2 · Borta</small><b>${pct(p.away_win)}</b></div></div>` : '<p class="muted">Ingen prognos tillgänglig: otillräcklig verifierad matchhistorik.</p>'}</article>`;
+  const finished = m.status === "FINISHED";
+  const live = m.status === "LIVE";
+  const pending = m.status === "PENDING" ||
+    (m.status === "SCHEDULED" && new Date(m.date).getTime() <= Date.now());
+  const status = finished ? `SLUT · 60 min: ${esc(m.score.home)}–${esc(m.score.away)}` :
+    live ? "PÅGÅR · resultat inväntas" : pending ? "STARTAD · resultat inväntas" : "Kommande";
+  const outcome = finished && m.actual_outcome && m.predicted_outcome ?
+    `<p class="muted" style="margin-top:10px">Prognos före match: ${esc(m.predicted_outcome)} · Utfall efter 60 min: ${esc(m.actual_outcome)} · <strong>${m.predicted_outcome === m.actual_outcome ? "✓ Rätt" : "✕ Fel"}</strong></p>` : "";
+  const probabilities = p ? `<div class="percent"><div><small>1 · Hemma</small><b>${pct(p.home_win)}</b></div><div><small>X · Oavgjort</small><b>${pct(p.draw)}</b></div><div><small>2 · Borta</small><b>${pct(p.away_win)}</b></div></div>` :
+    `<p class="muted">${finished ? "Ingen arkiverad prognos före matchstart." : pending || live ? "Resultatet kontrolleras mot NHL:s officiella uppgifter." : "Ingen prognos tillgänglig: otillräcklig verifierad matchhistorik."}</p>`;
+  return `<article class="panel match" data-id="${esc(m.id)}"><div class="topline"><span>${esc(m.league)} · ${esc(formatDate(m.date))}</span><span>${status}</span></div><div class="teams"><div class="team-side">${teamMark(m.home, m.league)}<span>${esc(displayTeamName(m.home, m.league))}</span></div><span class="vs">${finished ? `${esc(m.score.home)}–${esc(m.score.away)}` : "VS"}</span><div class="team-side">${teamMark(m.away, m.league)}<span>${esc(displayTeamName(m.away, m.league))}</span></div></div>${finished ? '<p class="muted" style="margin-bottom:8px">Arkiverad prognos före matchstart</p>' : ''}${probabilities}${outcome}</article>`;
 }
 
 // Resultat efter 60 minuter: V / O / F utifrån valt lags perspektiv.
@@ -671,7 +681,7 @@ async function loadHistory() {
 }
 // Fast league switching: stale-while-revalidate with a small, bounded session cache.
 // Never persist sensitive data; these endpoints contain only public match information.
-const MATCH_CACHE_TTL = 45 * 1000;
+const MATCH_CACHE_TTL = 20 * 1000;
 const MATCH_CACHE_STALE = 5 * 60 * 1000;
 const MATCH_CACHE_MAX = 12;
 const matchCache = new Map();
@@ -771,3 +781,13 @@ async function load(force = false) {
 load();
 if ("serviceWorker" in navigator)
   navigator.serviceWorker.register("/sw.js").catch(() => {});
+
+// Refresh recent NHL results while the page is open; never overwrite manual date selection.
+setInterval(() => {
+  if (state.view !== "matches" || state.loading) return;
+  if (state.matches.some(m => m.league === "NHL" &&
+      (m.status === "LIVE" || m.status === "PENDING" ||
+       (m.status === "SCHEDULED" && new Date(m.date).getTime() <= Date.now())))) {
+    load(true);
+  }
+}, 60 * 1000);

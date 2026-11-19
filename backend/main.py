@@ -293,7 +293,7 @@ def fetch_nhl(start=None, end=None):
     Use only official NHL API data.
     """
 
-    today = date.today()
+    today = datetime.now(ZoneInfo("Europe/Stockholm")).date()
     # Current NHL season starts in autumn. Include all its regular-season
     # games, so every team can build a 20-game form window.
     season_year = today.year if today.month >= 9 else today.year - 1
@@ -384,6 +384,11 @@ def fetch_nhl(start=None, end=None):
 
             else:
                 row = normalize_nhl(game)
+                # NHL LIVE/CRIT games are not upcoming. No unverified 60-minute score.
+                if state in ("LIVE", "CRIT"):
+                    row["status"] = "LIVE"
+                elif state not in ("FUT", "PRE"):
+                    row["status"] = "PENDING"
                 output.append(row)
                 scheduled += 1
 
@@ -433,20 +438,14 @@ def recompute():
             # Refresh upcoming forecasts after each import, so newly finished
             # matches affect probabilities. Historical predictions remain frozen.
             c.execute("DELETE FROM predictions WHERE match_id=?", (match["id"],))
+            # Include all stored earlier seasons, never the fixture or future games.
+            # The model discounts older results instead of discarding them.
             history = c.execute(
-                """
-                SELECT * FROM matches
-                WHERE league=?
-                  AND status='FINISHED'
-                  AND date<?
-                  AND date>=?
-                ORDER BY date
-                """,
-                (
-                    match["league"],
-                    match["date"],
-                    f"{(datetime.fromisoformat(match['date'].replace('Z', '+00:00')).year if datetime.fromisoformat(match['date'].replace('Z', '+00:00')).month >= 9 else datetime.fromisoformat(match['date'].replace('Z', '+00:00')).year - 1)}-" + ("09-01" if match["league"] == "SHL" else "10-01"),
-                ),
+                """SELECT * FROM matches
+                   WHERE league=? AND status='FINISHED' AND date<?
+                     AND home_goals IS NOT NULL AND away_goals IS NOT NULL
+                   ORDER BY date, id""",
+                (match["league"], match["date"]),
             ).fetchall()
 
             try:
@@ -625,8 +624,13 @@ def store_if_changed(league, games):
             ).fetchall():
                 existing[row["id"]] = row
     keys = ("date", "home_name", "away_name", "home_goals", "away_goals", "status")
-    updates = [g for g in games if g["id"] not in existing or
-               any(g.get(k) != existing[g["id"]][k] for k in keys)]
+    updates = [
+        g for g in games
+        if not (g["id"] in existing and existing[g["id"]]["status"] == "FINISHED"
+                and g.get("status") != "FINISHED")
+        and (g["id"] not in existing or
+             any(g.get(k) != existing[g["id"]][k] for k in keys))
+    ]
     if updates:
         store(league, updates)
         log.info("%s: %s changes out of %s matches", league, len(updates), len(games))
@@ -840,13 +844,47 @@ def serialize(c, match, prediction=None, preloaded=False):
             "created_at": prediction["created_at"],
         }
 
+    # For finished games, use only the archived pre-match prediction.
+    # This avoids accidentally presenting a recalculated post-match forecast.
+    if match["status"] == "FINISHED":
+        archived = c.execute(
+            "SELECT * FROM forecast_archive WHERE match_id=? AND created_at < ?",
+            (match["id"], match["date"]),
+        ).fetchone()
+        prediction_data = ({
+            "home_win": archived["home_win"], "draw": archived["draw"],
+            "away_win": archived["away_win"],
+            "expected_home": archived["expected_home"],
+            "expected_away": archived["expected_away"],
+            "details": json.loads(archived["details"]),
+            "created_at": archived["created_at"],
+        } if archived else None)
+
+    effective_status = match["status"]
+    if effective_status == "SCHEDULED":
+        kickoff = datetime.fromisoformat(match["date"].replace("Z", "+00:00"))
+        if kickoff.tzinfo is None:
+            kickoff = kickoff.replace(tzinfo=timezone.utc)
+        if kickoff <= datetime.now(timezone.utc):
+            effective_status = "PENDING"  # Not a verified final result yet.
+    actual_outcome = None
+    predicted_outcome = None
+    if effective_status == "FINISHED" and match["home_goals"] is not None and match["away_goals"] is not None:
+        actual_outcome = ("1" if match["home_goals"] > match["away_goals"] else
+                          "2" if match["home_goals"] < match["away_goals"] else "X")
+        if prediction_data:
+            predicted_outcome = max(("1", "X", "2"), key=lambda k: {
+                "1": prediction_data["home_win"], "X": prediction_data["draw"],
+                "2": prediction_data["away_win"]}[k])
     return {
+        "actual_outcome": actual_outcome,
+        "predicted_outcome": predicted_outcome,
         "id": match["id"],
         "date": match["date"],
         "league": match["league"],
         "home": match["home_name"],
         "away": match["away_name"],
-        "status": match["status"],
+        "status": effective_status,
         "score": {
             "home": match["home_goals"],
             "away": match["away_goals"],
@@ -867,27 +905,24 @@ def matches(
             "Okänd liga",
         )
 
-    day = day or date.today()
+    day = day or datetime.now(ZoneInfo("Europe/Stockholm")).date()
     cache_key = (day.isoformat(), days, league)
     with _match_response_lock:
         cached = _match_response_cache.get(cache_key)
         if cached and cached[0] > time.monotonic():
             return cached[1]
 
-    end = (
-        day + timedelta(days=days)
-    ).isoformat()
-
+    # API dates refer to Swedish calendar days; database dates are UTC ISO.
+    # Correctly handles NHL games played after midnight in Sweden and DST.
+    sweden = ZoneInfo("Europe/Stockholm")
+    start_utc = datetime.combine(day, datetime.min.time(), sweden).astimezone(timezone.utc).isoformat()
+    end_utc = datetime.combine(day + timedelta(days=days), datetime.min.time(), sweden).astimezone(timezone.utc).isoformat()
     sql = """
         SELECT * FROM matches
         WHERE date>=?
           AND date<?
     """
-
-    params = [
-        day.isoformat(),
-        end,
-    ]
+    params = [start_utc, end_utc]
 
     if league:
         sql += " AND league=?"
@@ -1072,17 +1107,13 @@ def backtest(league: str = "SHL", limit: int = Query(default=120, ge=20, le=300)
         d = datetime.fromisoformat(iso.replace('Z', '+00:00'))
         return d.year if d.month >= (9 if league == 'SHL' else 10) else d.year - 1
 
-    by_season = {}
-    for row in rows:
-        by_season.setdefault(season_key(row['date']), []).append(row)
-    # Group by exact start time: simultaneous matches must not inform each other.
+    # Walk forward across ALL available seasons. Never let matches starting
+    # at the same instant influence each other's retrospective predictions.
     eligible = []
-    for season_rows in by_season.values():
-        for row in season_rows:
-            prior = [r for r in season_rows if r['date'] < row['date']]
-            if len(prior) >= 20:
-                eligible.append((row, prior))
-    eligible.sort(key=lambda item: (item[0]['date'], item[0]['id']))
+    for i, row in enumerate(rows):
+        prior = [r for r in rows[:i] if r['date'] < row['date']]
+        if len(prior) >= 20:
+            eligible.append((row, prior))
     eligible = eligible[-limit:]
     results = {name: {"evaluated": 0, "correct": 0, "brier_sum": 0.0, "log_loss_sum": 0.0}
                for name in (('current', 'experimental', 'h2h') if league == 'SHL' else ('current', 'experimental'))}

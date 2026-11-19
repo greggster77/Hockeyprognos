@@ -1,5 +1,7 @@
 from math import exp, factorial
 from collections import defaultdict
+from datetime import datetime, timezone
+from math import log
 
 def poisson(k: int, lam: float) -> float:
     if k < 0 or lam < 0: raise ValueError('Invalid Poisson inputs')
@@ -70,13 +72,23 @@ def predict(history, home_id, away_id, league="NHL", variant="current"):
     if variant not in ("current", "experimental", "h2h"):
         raise ValueError("Okänd modellvariant")
     # history contains ONLY completed matches before the prediction date,
-    # sorted chronologically, within the current NHL season.
+    # sorted chronologically, potentially spanning multiple seasons.
     if len(history) < 20:
         raise ValueError("För få matcher i säsongen (minst 20 krävs).")
     ratings = defaultdict(lambda: 1500.0)
+    # Carry some strength between seasons while allowing roster changes.
+    # Team identifiers must remain stable across seasons for this to help.
+    previous_season = None
+    season_start_month = 9 if league in ("SHL", "HA") else 10
     for m in history:
         if m.home_goals is None or m.away_goals is None:
             continue
+        d = datetime.fromisoformat(m.date.replace('Z', '+00:00'))
+        season = d.year if d.month >= season_start_month else d.year - 1
+        if previous_season is not None and season != previous_season:
+            for team in list(ratings):
+                ratings[team] = 1500 + (ratings[team] - 1500) * (0.60 ** (season - previous_season))
+        previous_season = season
         ratings[m.home_id], ratings[m.away_id] = update_elo(
             ratings[m.home_id], ratings[m.away_id], m.home_goals, m.away_goals)
     window = 10 if league == "SHL" else 20
@@ -84,8 +96,17 @@ def predict(history, home_id, away_id, league="NHL", variant="current"):
     af = weighted_form(history, away_id, limit=window)
     if hf["played"] < 3 or af["played"] < 3:
         raise ValueError("För få matcher för något av lagen (minst 3).")
-    league_home = sum(m.home_goals for m in history) / len(history)
-    league_away = sum(m.away_goals for m in history) / len(history)
+    # Half-life 365 days: prior seasons contribute without overwhelming form.
+    # The latest completed match is the reference point; no future data used.
+    latest = datetime.fromisoformat(history[-1].date.replace('Z', '+00:00'))
+    weighted = []
+    for m in history:
+        when = datetime.fromisoformat(m.date.replace('Z', '+00:00'))
+        age_days = max(0.0, (latest - when).total_seconds() / 86400)
+        weighted.append(0.5 ** (age_days / 365.0))
+    total_weight = sum(weighted)
+    league_home = sum(m.home_goals * w for m, w in zip(history, weighted)) / total_weight
+    league_away = sum(m.away_goals * w for m, w in zip(history, weighted)) / total_weight
     if league_home <= 0 or league_away <= 0:
         raise ValueError("Ogiltigt ligasnitt")
 
@@ -141,7 +162,9 @@ def predict(history, home_id, away_id, league="NHL", variant="current"):
         "home_form": {"played": hf["played"], "scored": round(hf["gf"] * hf["played"], 1), "conceded": round(hf["ga"] * hf["played"], 1)},
         "away_form": {"played": af["played"], "scored": round(af["gf"] * af["played"], 1), "conceded": round(af["ga"] * af["played"], 1)},
         "league_home_avg": round(league_home, 2), "league_away_avg": round(league_away, 2),
-        "model_version": (("shl-dc-experimental-v1" if league == "SHL" else "nhl-dc-experimental-v1") if variant == "experimental" else ("shl-2026-10games-70pct-v1" if league == "SHL" else "nhl-2026-20games-70pct-v1")), "recent_matches": 5,
+        "historical_matches_used": len(history), "history_half_life_days": 365,
+        "elo_season_retention": 0.60,
+        "model_version": (("shl-dc-experimental-v1" if league == "SHL" else "nhl-dc-experimental-v1") if variant == "experimental" else ("shl-history-weighted-v2" if league == "SHL" else "history-weighted-v2")), "recent_matches": 5,
         "window_matches": window, "recent_weight_pct": 70,
         "home_venue_games": len(hf["home"]), "away_venue_games": len(af["away"]),
     })
