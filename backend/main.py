@@ -6,6 +6,7 @@ import threading
 import time
 
 from datetime import datetime, timedelta, timezone, date
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -31,7 +32,7 @@ LEAGUES = {
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-scheduler = BackgroundScheduler(timezone="UTC")
+scheduler = BackgroundScheduler(timezone="Europe/Stockholm")
 sync_lock = threading.Lock()
 
 # Small in-process read cache. It avoids repeated Neon connections and SQL
@@ -286,7 +287,7 @@ def nhl_final(game, landing):
     }
 
 
-def fetch_nhl():
+def fetch_nhl(start=None, end=None):
     """
     Fetch NHL schedule and completed games.
     Use only official NHL API data.
@@ -296,8 +297,10 @@ def fetch_nhl():
     # Current NHL season starts in autumn. Include all its regular-season
     # games, so every team can build a 20-game form window.
     season_year = today.year if today.month >= 9 else today.year - 1
-    start = date(season_year, 10, 1)
-    end = today + timedelta(days=21)
+    if start is None:
+        start = date(season_year, 10, 1)
+    if end is None:
+        end = today + timedelta(days=21)
 
     games = {}
     # Avoid repeatedly downloading detailed scoring for completed games.
@@ -562,62 +565,99 @@ def recompute():
             )
 
 
-def sync():
+def sync(mode="weekly"):
+    """Weekly schedule refresh; lightweight NHL results polling between refreshes.
+
+    Historical matches remain in Neon and are never deleted.
+    """
     if not sync_lock.acquire(blocking=False):
         log.info("Sync already running")
         return
-
     try:
-        for league in LEAGUES:
+        today = datetime.now(ZoneInfo("Europe/Stockholm")).date()
+        if mode == "results":
+            # NHL results only. The regular weekly job refreshes all league schedules.
+            leagues = ("NHL",)
+        else:
+            leagues = tuple(LEAGUES)
+
+        changed = False
+        for league in leagues:
             try:
-                games = (
-                    fetch_nhl()
-                    if league == "NHL"
-                    else fetch_swedish(league)
-                )
-
-                store(league, games)
-
+                if league == "NHL":
+                    games = fetch_nhl(
+                        start=today - timedelta(days=2),
+                        end=today + timedelta(days=7 if mode == "weekly" else 1),
+                    )
+                else:
+                    games = fetch_swedish(league)
+                    # Keep only current/next week; historical rows already live in Neon.
+                    # The source may return no schedule for a league: never delete old data.
+                    lower = (today - timedelta(days=2)).isoformat()
+                    upper = (today + timedelta(days=8)).isoformat()
+                    games = [g for g in games if lower <= str(g["date"])[:10] < upper]
+                if games:
+                    changed = store_if_changed(league, games) or changed
             except Exception as exc:
-                log.exception(
-                    "Sync failed %s",
-                    league,
-                )
-
+                log.exception("Sync failed %s", league)
                 error(league, exc)
-
-        recompute()
-        invalidate_match_response_cache()
-
+        if changed:
+            recompute()
+            invalidate_match_response_cache()
     finally:
         sync_lock.release()
+
+
+def store_if_changed(league, games):
+    """Avoid writes and forecast recalculation if the imported rows are unchanged."""
+    ids = [g["id"] for g in games]
+    with db() as c:
+        existing = {}
+        # Bounded batches also work with PostgreSQL parameter limits.
+        for start in range(0, len(ids), 200):
+            batch = ids[start:start + 200]
+            if not batch:
+                continue
+            placeholders = ",".join("?" for _ in batch)
+            for row in c.execute(
+                f"SELECT id,date,home_name,away_name,home_goals,away_goals,status "
+                f"FROM matches WHERE id IN ({placeholders})", batch
+            ).fetchall():
+                existing[row["id"]] = row
+    keys = ("date", "home_name", "away_name", "home_goals", "away_goals", "status")
+    updates = [g for g in games if g["id"] not in existing or
+               any(g.get(k) != existing[g["id"]][k] for k in keys)]
+    if updates:
+        store(league, updates)
+        log.info("%s: %s changes out of %s matches", league, len(updates), len(games))
+        return True
+    return False
 
 
 @asynccontextmanager
 async def lifespan(app):
     init()
 
+    # Runs at local Swedish midnight on Sundays, provided Render is awake.
     scheduler.add_job(
-        sync,
-        "interval",
-        hours=3,
-        id="sync",
-        max_instances=1,
-        replace_existing=True,
+        sync, "cron", day_of_week="sun", hour=0, minute=0,
+        kwargs={"mode": "weekly"}, id="weekly-schedule",
+        max_instances=1, coalesce=True, replace_existing=True,
     )
-
+    # Lightweight NHL result checks; does not reload an entire season.
+    scheduler.add_job(
+        sync, "interval", minutes=15, kwargs={"mode": "results"},
+        id="nhl-results", max_instances=1, coalesce=True, replace_existing=True,
+    )
     scheduler.add_job(refresh_shl_stats, "interval", minutes=30,
                       id="shl-stats", max_instances=1, replace_existing=True)
     scheduler.add_job(refresh_model_evaluation, "interval", hours=24,
                       id="model-evaluation", max_instances=1, replace_existing=True)
     scheduler.start()
     threading.Thread(target=refresh_shl_stats, name="initial-shl-stats", daemon=True).start()
-
-    threading.Thread(
-        target=sync,
-        name="initial-hockey-sync",
-        daemon=True,
-    ).start()
+    # Short initial refresh, not the full NHL season.
+    threading.Thread(target=sync, kwargs={"mode": "weekly"},
+                     name="initial-week-sync", daemon=True).start()
 
     yield
 
