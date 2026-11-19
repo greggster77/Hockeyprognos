@@ -199,8 +199,16 @@ const SHL_CANONICAL = {
   "Björklöven Herr": "Björklöven",
 };
 
+const HA_CANONICAL = {
+  LIF: "Leksands IF", VIS: "Visby/Roma HK", AIK: "AIK", SSK: "Södertälje SK",
+  KHC: "Kalmar HC", AIS: "Almtuna IS", MORA: "Mora IK", MODO: "MoDo Hockey",
+  BIK: "BIK Karlskoga", IKO: "IK Oskarshamn", NYB: "Nybro Vikings IF",
+  VIK: "Västerås IK", VHC: "Vimmerby HC", OIK: "Östersunds IK"
+};
 function displayTeamName(name, league) {
-  return league === "SHL" ? SHL_CANONICAL[name] || name : name;
+  if (league === "SHL") return SHL_CANONICAL[name] || name;
+  if (league === "HA") return HA_CANONICAL[String(name).toUpperCase()] || name;
+  return name;
 }
 // SHL:s officiella lagregister ger klubbmärken direkt, utan Wikimedia-sökning.
 // 2026/27 grundserie: ssgtUuid från SHL:s layout-info.
@@ -243,7 +251,8 @@ async function resolveSwedishLogo(league, name) {
   const key = logoKey(league, canonical);
   if (logoMemo.has(key)) return logoMemo.get(key);
   const sites = await loadSwedishLogoDirectory(league);
-  const targets = [canonical, name, ...(SWEDISH_CLUBS[league]?.[name] || [])].map(normalizedLogoText);
+  const targets = [canonical, name, ...(SWEDISH_CLUBS[league]?.[name] || []),
+    ...(SWEDISH_CLUBS[league]?.[canonical] || [])].map(normalizedLogoText);
   const site = sites.find((s) => [s.name, s.fullName, s.code].some((n) => targets.includes(normalizedLogoText(n))));
   let url = site?.icon || "";
   if (url.startsWith("//")) url = "https:" + url;

@@ -205,6 +205,36 @@ def _ha_response_shape(value, depth=0):
     return type(value).__name__
 
 
+# HA publishes short match codes while its directory contains canonical team codes.
+# Explicit aliases prevent LIF/Leksand and MORA/MoDo from being confused.
+HA_ALIASES = {
+    'LIF': 'Leksands IF', 'VIS': 'Visby/Roma HK', 'AIK': 'AIK',
+    'SSK': 'Södertälje SK', 'KHC': 'Kalmar HC', 'AIS': 'Almtuna IS',
+    'MORA': 'Mora IK', 'MODO': 'MoDo Hockey', 'MO DO': 'MoDo Hockey',
+    'BIK': 'BIK Karlskoga', 'IKO': 'IK Oskarshamn',
+    'NYB': 'Nybro Vikings IF', 'VIK': 'Västerås IK',
+    'VHC': 'Vimmerby HC', 'OIK': 'Östersunds IK',
+}
+
+
+def _ha_key(value):
+    return re.sub(r'[^a-z0-9]', '', str(value or '').casefold().translate(
+        str.maketrans({'å': 'a', 'ä': 'a', 'ö': 'o'})))
+
+
+def _ha_team_index(teams):
+    index = {}
+    for team in teams:
+        for name in (team['name'], team['fullName'], team['code']):
+            if name:
+                index[_ha_key(name)] = team
+    for alias, canonical in HA_ALIASES.items():
+        team = index.get(_ha_key(canonical))
+        if team:
+            index[_ha_key(alias)] = team
+    return index
+
+
 def _ha_teams(payload):
     """Official club names and logos from the same HA response."""
     teams = []
@@ -293,11 +323,7 @@ def parse_ha_stats(payload):
                 return normalized
         raise ValueError('HA: statistik-API saknar verifierbar results-lista')
     teams = _ha_teams(payload)
-    team_index = {}
-    for t in teams:
-        for k in (t['name'], t['fullName'], t['code']):
-            if k:
-                team_index[str(k).casefold()] = t
+    team_index = _ha_team_index(teams)
     normalized = []
     for game in games:
         if not isinstance(game, dict):
@@ -308,15 +334,17 @@ def parse_ha_stats(payload):
         if not (home and away and when):
             continue
         home = str(home); away = str(away)
-        ht = team_index.get(home.casefold(), {})
-        at = team_index.get(away.casefold(), {})
+        ht = team_index.get(_ha_key(home), {})
+        at = team_index.get(_ha_key(away), {})
         # Stable per-team IDs across imports, using official team code when available.
         home_id = str(ht.get('code') or home)
         away_id = str(at.get('code') or away)
         ident = pick(game, 'GameId', 'gameId', 'id', 'statnet_game_number') or f'{when}-{home_id}-{away_id}'
         item = {'id': 'HA:' + str(ident), 'date': when,
                 'home_id': 'HA:' + home_id, 'away_id': 'HA:' + away_id,
-                'home_name': home, 'away_name': away, 'status': 'SCHEDULED'}
+                'home_name': ht.get('fullName') or ht.get('name') or HA_ALIASES.get(home.upper(), home),
+                'away_name': at.get('fullName') or at.get('name') or HA_ALIASES.get(away.upper(), away),
+                'status': 'SCHEDULED'}
         final = pick(game, 'GameResult', 'gameResult')
         if isinstance(final, dict) and integer(pick(final, 'Home', 'home')) is not None and integer(pick(final, 'Away', 'away')) is not None:
             score = _ha_period_score(game)
@@ -331,6 +359,9 @@ def parse_ha_stats(payload):
     if not normalized:
         logging.getLogger(__name__).warning('HA API diagnostic: shape=%s', json.dumps(_ha_response_shape(payload), ensure_ascii=False)[:2400])
         raise ValueError('HA: results innehöll inga verifierbara matcher')
+    logging.getLogger(__name__).info('HA parsed: %d matches, %d finished (60 min), %d scheduled, %d registered teams',
+        len(normalized), sum(g['status'] == 'FINISHED' for g in normalized),
+        sum(g['status'] == 'SCHEDULED' for g in normalized), len(teams))
     return normalized
 
 

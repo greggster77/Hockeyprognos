@@ -462,7 +462,9 @@ def recompute():
                     league=match["league"],
                 )
 
-            except ValueError:
+            except ValueError as exc:
+                if match["league"] == "HA":
+                    log.info("HA forecast skipped %s: %s (verified history=%d)", match["id"], exc, len(history))
                 continue
 
             # Archive the latest genuine pregame forecast for later evaluation.
@@ -593,11 +595,13 @@ def sync(mode="weekly"):
                     )
                 else:
                     games = fetch_swedish(league)
-                    # Keep only current/next week; historical rows already live in Neon.
-                    # The source may return no schedule for a league: never delete old data.
-                    lower = (today - timedelta(days=2)).isoformat()
-                    upper = (today + timedelta(days=8)).isoformat()
-                    games = [g for g in games if lower <= str(g["date"])[:10] < upper]
+                    # HA's official season feed includes historical results. Import all
+                    # verified regulation scores so the model can build team form.
+                    # SHL keeps its existing bounded refresh behaviour.
+                    if league != "HA":
+                        lower = (today - timedelta(days=2)).isoformat()
+                        upper = (today + timedelta(days=8)).isoformat()
+                        games = [g for g in games if lower <= str(g["date"])[:10] < upper]
                 if games:
                     changed = store_if_changed(league, games) or changed
             except Exception as exc:
