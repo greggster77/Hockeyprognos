@@ -136,6 +136,8 @@ def normalize_flat(league, data):
 
 
 def find_shl_season(payload, end_year):
+    """Select only the requested SHL regular season, never a neighboring year."""
+    start_year = end_year - 1
     candidates = []
 
     def visit(node):
@@ -150,12 +152,41 @@ def find_shl_season(payload, end_year):
                     visit(child)
 
     visit(payload)
+    matches = []
     for candidate in candidates:
         info = pick(candidate, 'seasonInfo', 'season')
-        label = ' '.join(str(v) for v in (pick(candidate, 'seasonName', 'name', 'label'), pick(info, 'name', 'seasonName')) if v)
-        if (f'{end_year - 1}/{end_year}' in label or str(end_year) in label) and pick(pick(candidate, 'gameType', 'gameTypeInfo'), 'code') == 'regular' and pick(pick(candidate, 'series', 'seriesInfo'), 'code') == 'SHL':
-            return candidate
-    raise ValueError(f'SHL: hittade ingen säsong för {end_year} i katalogen')
+        label = ' '.join(str(v) for v in (
+            pick(candidate, 'seasonName', 'name', 'label'),
+            pick(info, 'name', 'seasonName'),
+        ) if v)
+        # Require an explicit complete season range: 2024/2025, 2024/25,
+        # 2024-2025 or 2024-25. A bare "2025" also matches 2025/26.
+        season_pattern = rf'(?<!\d){start_year}\s*[/\-–]\s*(?:{end_year}|{end_year % 100:02d})(?!\d)'
+        if not re.search(season_pattern, label):
+            continue
+        if pick(pick(candidate, 'gameType', 'gameTypeInfo'), 'code') != 'regular':
+            continue
+        if pick(pick(candidate, 'series', 'seriesInfo'), 'code') != 'SHL':
+            continue
+        matches.append(candidate)
+
+    if not matches:
+        raise ValueError(f'SHL: no exact regular-season match for {start_year}/{end_year} in catalog')
+    # Duplicated nested catalog objects can point to the same season;
+    # select the first only when identifiers are unambiguous.
+    def ids(item):
+        info = pick(item, 'seasonInfo', 'season')
+        gt = pick(item, 'gameTypeInfo', 'gameType')
+        series = pick(item, 'seriesInfo', 'series')
+        return (
+            pick(item, 'seasonUuid') or pick(info, 'uuid'),
+            pick(item, 'gameTypeUuid') or pick(gt, 'uuid'),
+            pick(item, 'seriesUuid') or pick(series, 'uuid'),
+        )
+    unique = {ids(item) for item in matches}
+    if len(unique) != 1:
+        raise ValueError(f'SHL: ambiguous catalog identifiers for {start_year}/{end_year}: {len(unique)} choices')
+    return matches[0]
 
 
 def parse_shl_schedule(payload):
