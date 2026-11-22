@@ -5,13 +5,11 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
-      - key: DB_PATH
-        value: /tmp/hockey.db
-      - key: SHL_FEED_URL
-        sync: false
-      - key: SHL_FEED_TOKEN
-        sync: false
-      - key: HA_FEED_URL
-        sync: false
-      - key: HA_FEED_TOKEN
+      - key: HOCKEY_PUBLIC_PROXY
+        value: "1"
+      - key: HOCKEY_DISABLE_JOBS
+        value: "1"
+      - key: HOCKEY_GATEWAY_URL
+        value: https://cmp-vortininja.taileea46c.ts.net
+      - key: HOCKEY_GATEWAY_TOKEN
         sync: false
