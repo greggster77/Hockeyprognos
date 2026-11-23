@@ -18,6 +18,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from model import predict
 from learning import train as train_learning
+from ai_model import evaluate as evaluate_ai2
 import odds
 from storage import connect as storage_connect, USING_NEON
 
@@ -1601,6 +1602,23 @@ def refresh_ai_learning(only_league=None):
                              trained_at=excluded.trained_at, payload=excluded.payload""",
                           (league, datetime.now(timezone.utc).isoformat(), json.dumps(report)))
             log.info('AI learning %s: %s', league, report.get('status'))
+
+            # AI 2.0 runs independently of the existing calibration report.
+            # The same chronological pregame samples are used, but AI 2.0
+            # writes to its own table and never changes live predictions.
+            try:
+                ai2_report = evaluate_ai2(samples, league)
+                with db() as c:
+                    c.execute("""CREATE TABLE IF NOT EXISTS ai2_training_reports
+                                 (league TEXT PRIMARY KEY, trained_at TEXT NOT NULL,
+                                  payload TEXT NOT NULL)""")
+                    c.execute("""INSERT INTO ai2_training_reports (league, trained_at, payload)
+                                 VALUES (?, ?, ?) ON CONFLICT (league) DO UPDATE SET
+                                 trained_at=excluded.trained_at, payload=excluded.payload""",
+                              (league, now(), json.dumps(ai2_report)))
+                log.info('AI 2.0 learning %s: %s', league, ai2_report.get('status'))
+            except Exception:
+                log.exception('AI 2.0 learning failed for %s', league)
         except Exception:
             log.exception('AI learning failed for %s', league)
 
@@ -1646,6 +1664,26 @@ def ai_training_status(league: str = 'SHL'):
                 'schedule': 'Monday 04:15 Europe/Stockholm (when server is running)',
                 'live_model_changed': False
         }
+
+    report = json.loads(row['payload'])
+    report['trained_at'] = row['trained_at']
+    return report
+
+
+@app.get('/api/ai2/training')
+def ai2_training_status(league: str = 'SHL'):
+    """Read-only report from the experimental AI 2.0 model."""
+    if league not in LEAGUES:
+        raise HTTPException(status_code=400, detail='Okänd liga')
+    with db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS ai2_training_reports
+                     (league TEXT PRIMARY KEY, trained_at TEXT NOT NULL,
+                      payload TEXT NOT NULL)""")
+        row = c.execute('SELECT trained_at, payload FROM ai2_training_reports WHERE league=?',
+                        (league,)).fetchone()
+    if row is None:
+        return {'league': league, 'status': 'awaiting_first_training',
+                'live_model_changed': False}
     report = json.loads(row['payload'])
     report['trained_at'] = row['trained_at']
     return report
