@@ -1644,8 +1644,11 @@ def ai_training_status(league: str = 'SHL'):
     if row is None:
         return {'league': league, 'status': 'awaiting_first_weekly_training',
                 'schedule': 'Monday 04:15 Europe/Stockholm (when server is running)',
-                'live_model_changed': False}
-    return json.loads(row['payload'])
+                'live_model_changed': False
+        }
+    report = json.loads(row['payload'])
+    report['trained_at'] = row['trained_at']
+    return report
 
 
 # Catch-all static mount must be registered AFTER all API routes.
