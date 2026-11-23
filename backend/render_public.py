@@ -48,6 +48,45 @@ async def proxy_api(path: str, request: Request):
     except httpx.RequestError:
         raise HTTPException(502, "Gateway unavailable")
 
+
+@app.post("/api/ai/training/run")
+async def start_ai_training(request: Request):
+    if not GATEWAY_URL or not GATEWAY_TOKEN:
+        raise HTTPException(503, "Gateway not configured")
+
+    admin_token = request.headers.get("X-Training-Token", "")
+    if not admin_token:
+        raise HTTPException(403, "Administratörsnyckel saknas")
+
+    league = request.query_params.get("league", "SHL")
+
+    if league not in ("SHL", "HA", "NHL"):
+        raise HTTPException(400, "Okänd liga")
+
+    try:
+        async with httpx.AsyncClient(timeout=35) as client:
+            upstream = await client.post(
+                f"{GATEWAY_URL}/api/ai/training/run",
+                params={"league": league},
+                headers={
+                    "X-Gateway-Token": GATEWAY_TOKEN,
+                    "X-Training-Token": admin_token,
+                },
+            )
+
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get(
+                "content-type", "application/json"
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    except httpx.RequestError:
+        raise HTTPException(502, "Linux-servern svarar inte")
+
+
 # Webbappen serveras efter API-rutterna
 app.mount(
     "/",
