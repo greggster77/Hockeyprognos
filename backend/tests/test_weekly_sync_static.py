@@ -2,8 +2,7 @@ from pathlib import Path
 import ast
 import unittest
 
-SOURCE = Path(__file__).resolve().parents[1] / "backend" / "main.py"
-
+SOURCE = Path(__file__).resolve().parents[2] / "backend" / "main.py"
 class WeeklySyncTests(unittest.TestCase):
     def test_backend_parses(self):
         ast.parse(SOURCE.read_text(encoding="utf-8"))

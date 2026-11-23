@@ -2,7 +2,7 @@ import ast
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 class NightGameTests(unittest.TestCase):
     def test_python_syntax(self):
