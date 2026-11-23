@@ -500,6 +500,10 @@ def recompute():
                     expected_home=excluded.expected_home,
                     expected_away=excluded.expected_away,
                     details=excluded.details
+                WHERE excluded.created_at < (
+                    SELECT date FROM matches
+                    WHERE id=excluded.match_id
+                )
                 """,
                 (
                     match["id"], now(), prediction["home_win"],
@@ -608,8 +612,8 @@ def sync(mode="weekly"):
     try:
         today = datetime.now(ZoneInfo("Europe/Stockholm")).date()
         if mode == "results":
-            # NHL results only. The regular weekly job refreshes all league schedules.
-            leagues = ("NHL",)
+            # Kontrollera resultat för samtliga ligor.
+            leagues = tuple(LEAGUES)
         else:
             leagues = tuple(LEAGUES)
 
@@ -677,6 +681,10 @@ def store_if_changed(league, games):
 @asynccontextmanager
 async def lifespan(app):
     init()
+    if os.getenv("HOCKEY_DISABLE_JOBS") == "1":
+        log.info("Testläge: automatiska jobb avstängda")
+        yield
+        return
 
     # Runs at local Swedish midnight on Sundays, provided Render is awake.
     scheduler.add_job(
@@ -687,7 +695,7 @@ async def lifespan(app):
     # Lightweight NHL result checks; does not reload an entire season.
     scheduler.add_job(
         sync, "interval", minutes=15, kwargs={"mode": "results"},
-        id="nhl-results", max_instances=1, coalesce=True, replace_existing=True,
+        id="all-league-results", max_instances=1, coalesce=True, replace_existing=True,
     )
     scheduler.add_job(refresh_shl_stats, "interval", minutes=30,
                       id="shl-stats", max_instances=1, replace_existing=True)
